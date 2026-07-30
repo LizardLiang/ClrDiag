@@ -1,0 +1,8 @@
+[Bb]in/
+[Oo]bj/
+[Aa]rtifacts/
+.tools/
+.clrdiag-reports/
+.vs/
+*.user
+*.suo

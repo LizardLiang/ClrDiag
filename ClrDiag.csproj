@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- 用 net10.0 而非 net10.0-windows：PackAsTool 不支援帶平台的 TFM，
+         而 Windows 專屬 API 是由 System.Diagnostics.PerformanceCounter 套件提供，不需要平台 TFM -->
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- ClrMD 需載入目標行程的原生 DAC，位元數必須一致；只支援 64 位元目標行程 -->
+    <PlatformTarget>x64</PlatformTarget>
+    <!-- 這是 Windows 專用工具，抑制跨平台相容性警告 -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>ClrDiag</RootNamespace>
+    <AssemblyName>clrdiag</AssemblyName>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>clrdiag</ToolCommandName>
+    <PackageId>ClrDiag.Console</PackageId>
+    <Version>0.1.1</Version>
+    <Description>Windows x64 .NET memory and thread diagnostics console.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Diagnostics.Runtime" Version="4.0.732401" />
+    <PackageReference Include="Spectre.Console" Version="0.57.2" />
+    <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="10.0.10" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Update="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+</Project>
