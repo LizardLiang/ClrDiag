@@ -270,6 +270,9 @@ public sealed record DiagConfig
             var psi = new ProcessStartInfo(vsWhere)
             {
                 RedirectStandardOutput = true,
+                // 同 ServerService：沒有主控台就沒有 CONIN$ 可開，避免搶走 TUI 的按鍵。
+                RedirectStandardInput = true,
+                CreateNoWindow = true,
                 UseShellExecute = false,
             };
             foreach (

@@ -81,6 +81,9 @@ public sealed class BuildService
                 // 同 ServerService：不導向標準輸入，MSBuild 會跟 TUI 搶主控台按鍵。
                 // 建置行程活得短，症狀只在建置期間出現，但成因與 serve 完全相同。
                 RedirectStandardInput = true,
+                // 同 ServerService：子行程必須完全沒有主控台，才能擋住直接開 CONIN$
+                // 讀鍵盤的工具（stdin 導向只能擋走 stdin handle 的讀取）。
+                CreateNoWindow = true,
                 UseShellExecute = false,
             };
 

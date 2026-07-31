@@ -164,6 +164,10 @@ public sealed class ServerService : IDisposable
             // 主控台輸入緩衝區，把使用者的按鍵吃掉，TUI 從此收不到 1/2/3/4 等按鍵。
             // 管道刻意保持開啟不寫入也不關閉：關閉會讓伺服器讀到 EOF 而可能自行結束。
             RedirectStandardInput = true,
+            // 但光導向 stdin 擋不住 IIS Express：它的「按 Q 結束」讀取器是直接開 CONIN$
+            // 讀鍵盤，不透過標準輸入 handle，所以子行程必須完全沒有主控台可開，
+            // 按鍵才會留在本工具的 TUI（等同 Visual Studio 啟動 IIS Express 的方式）。
+            CreateNoWindow = true,
             UseShellExecute = false,
         };
         foreach (string arg in config.ServeArguments ?? Array.Empty<string>())
@@ -404,6 +408,9 @@ public sealed class ServerService : IDisposable
             {
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
+                // 同上：沒有主控台就沒有 CONIN$ 可開，taskkill 不會搶走 TUI 的按鍵。
+                RedirectStandardInput = true,
+                CreateNoWindow = true,
                 UseShellExecute = false,
             };
 
