@@ -48,19 +48,21 @@ public sealed partial class DiagApp
         }
 
         var output = new System.Text.StringBuilder();
-        foreach (
-            DiagView target in new[]
-            {
-                DiagView.Memory,
-                DiagView.Heap,
-                DiagView.Threads,
-                DiagView.Log,
-                DiagView.Output,
-            }
-        )
+
+        // 八個面板各一張：0–2 是上排面板放大後的畫面（分割版面下看不到完整內容），
+        // 3–7 是一般分割版面下的中間檢視。
+        for (int target = 0; target < PaneNames.Length; target++)
         {
-            view = target;
-            output.AppendLine($"===== {target} =====");
+            selectedPane = target;
+            zoomed = target < FirstViewPane;
+            if (!zoomed)
+            {
+                view = (DiagView)(target - FirstViewPane);
+            }
+
+            output.AppendLine(
+                $"===== [{target}] {PaneName(target)}{(zoomed ? " (zoom)" : string.Empty)} ====="
+            );
             output.AppendLine(RenderFrame(width, height));
             output.AppendLine();
         }

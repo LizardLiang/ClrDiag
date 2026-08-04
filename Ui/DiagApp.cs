@@ -45,6 +45,17 @@ public sealed partial class DiagApp : IDisposable
     private int baselineIndex = -1;
 
     private DiagView view = DiagView.Memory;
+
+    // 面板編號：0–2 是上排的 build / serve / process，3–7 對應中間的五個檢視。
+    // 換號＝選取（回到分割版面），同號再按一次＝放大該面板（隱藏上排、佔滿畫面）。
+    private const int FirstViewPane = 3;
+    private int selectedPane = FirstViewPane;
+    private bool zoomed;
+
+    // 放大上排面板時的捲動位移；兩者都是由上往下（0 = 第一列）
+    private int buildScroll;
+    private int probeScroll;
+
     private HeapSort heapSort = HeapSort.Size;
     private string filter = string.Empty;
     private bool filterMode;
@@ -185,7 +196,7 @@ public sealed partial class DiagApp : IDisposable
                 .Size(8)
                 .SplitColumns(new Layout("build"), new Layout("serve"), new Layout("process")),
             new Layout("body"),
-            new Layout("footer").Size(4)
+            new Layout("footer").Size(5)
         );
 
     /// <summary>每次繪製前的狀態維護：偵測伺服器存活、健康探測、自動快照。</summary>
@@ -232,22 +243,34 @@ public sealed partial class DiagApp : IDisposable
 
     private void Render(Layout layout)
     {
-        layout["build"].Update(RenderBuildPanel());
-        layout["serve"].Update(RenderServePanel());
-        layout["process"].Update(RenderProcessPanel());
+        // 放大時整列上排隱藏，空間全部讓給 body；上排面板此時也不必再繪製
+        layout["top"].IsVisible = !zoomed;
+
+        if (!zoomed)
+        {
+            layout["build"].Update(RenderBuildPanel());
+            layout["serve"].Update(RenderServePanel());
+            layout["process"].Update(RenderProcessPanel());
+        }
+
+        // 放大中間檢視不需要另一套繪製函式：檢視本來就依 BodyHeight() 決定高度，
+        // 上排隱藏後 BodyHeight() 變大，內容自動填滿。
         layout["body"]
             .Update(
-                view switch
-                {
-                    DiagView.Memory => RenderMemoryView(),
-                    DiagView.Heap => RenderHeapView(),
-                    DiagView.Threads => RenderThreadsView(),
-                    DiagView.Output => RenderOutputView(),
-                    _ => RenderLogView(),
-                }
+                zoomed && selectedPane < FirstViewPane ? RenderZoom(selectedPane) : RenderBodyView()
             );
         layout["footer"].Update(RenderFooter());
     }
+
+    private IRenderable RenderBodyView() =>
+        view switch
+        {
+            DiagView.Memory => RenderMemoryView(),
+            DiagView.Heap => RenderHeapView(),
+            DiagView.Threads => RenderThreadsView(),
+            DiagView.Output => RenderOutputView(),
+            _ => RenderLogView(),
+        };
 
     private int BodyHeight()
     {
@@ -262,7 +285,8 @@ public sealed partial class DiagApp : IDisposable
             windowHeight = 40;
         }
 
-        return Math.Max(6, windowHeight - 8 - 4 - 2);
+        // 扣掉上排（放大時為 0）、footer 五列、body 面板自己的上下框線
+        return Math.Max(6, windowHeight - (zoomed ? 0 : 8) - 5 - 2);
     }
 
     private void HandleKey(ConsoleKeyInfo key)
@@ -273,26 +297,28 @@ public sealed partial class DiagApp : IDisposable
             return;
         }
 
+        // 數字鍵優先於其他按鍵處理，主鍵盤上排與數字鍵盤都吃
+        if (PaneDigit(key) is { } digit)
+        {
+            SelectPane(digit);
+            return;
+        }
+
         switch (key.Key)
         {
             case ConsoleKey.Q when key.Modifiers == 0:
-            case ConsoleKey.Escape:
                 cts.Cancel();
                 return;
-            case ConsoleKey.D1:
-                view = DiagView.Memory;
-                return;
-            case ConsoleKey.D2:
-                view = DiagView.Heap;
-                return;
-            case ConsoleKey.D3:
-                view = DiagView.Threads;
-                return;
-            case ConsoleKey.D4:
-                view = DiagView.Log;
-                return;
-            case ConsoleKey.D5:
-                view = DiagView.Output;
+            case ConsoleKey.Escape:
+                // 放大中先還原版面，再按一次才離開
+                if (zoomed)
+                {
+                    zoomed = false;
+                    status = "已還原分割版面";
+                    return;
+                }
+
+                cts.Cancel();
                 return;
             case ConsoleKey.UpArrow:
                 MoveCursor(-1);
@@ -317,13 +343,13 @@ public sealed partial class DiagApp : IDisposable
         switch (char.ToLowerInvariant(key.KeyChar))
         {
             case 'm':
-                view = DiagView.Memory;
+                FocusPane(PaneOf(DiagView.Memory));
                 break;
             case 'h':
-                view = DiagView.Heap;
+                FocusPane(PaneOf(DiagView.Heap));
                 break;
             case 'l':
-                view = DiagView.Log;
+                FocusPane(PaneOf(DiagView.Log));
                 break;
             case 'j':
                 MoveCursor(1);
@@ -390,7 +416,7 @@ public sealed partial class DiagApp : IDisposable
                 }
                 else
                 {
-                    view = DiagView.Threads;
+                    FocusPane(PaneOf(DiagView.Threads));
                 }
 
                 break;
@@ -404,11 +430,11 @@ public sealed partial class DiagApp : IDisposable
                     : "輸出範圍切換為: 只看附加的 PID";
                 break;
             case '?':
-                view = DiagView.Log;
+                FocusPane(PaneOf(DiagView.Log));
                 log.Add(
                     "diag",
                     LogKind.Info,
-                    "按鍵: 1/2/3/4/5 切換檢視 · b 建置 · c 設定 · s 啟動 · x 停止 · r 重建並重啟 · n 快照 · T 只更新執行緒 · d 設基準(D 清除) · o 排序 · / 過濾 · f 找根參考 · e 匯出 · a 自動快照 · p 換行程 · g 輸出檢視的 PID 範圍 · q 離開"
+                    "按鍵: 0/1/2 選 build/serve/process 面板 · 3/4/5/6/7 選記憶體/堆疊/執行緒/記錄/輸出 · 同號鍵再按一次放大（Esc 還原） · b 建置 · c 設定 · s 啟動 · x 停止 · r 重建並重啟 · n 快照 · T 只更新執行緒 · d 設基準(D 清除) · o 排序 · / 過濾 · f 找根參考 · e 匯出 · a 自動快照 · p 換行程 · g 輸出檢視的 PID 範圍 · q 離開"
                 );
                 break;
         }
@@ -442,8 +468,72 @@ public sealed partial class DiagApp : IDisposable
         }
     }
 
+    /// <summary>
+    /// 面板編號的按鍵解析。主鍵盤上排（D0–D7）與數字鍵盤（NumPad0–NumPad7）都接受；
+    /// 兩者都沒對上時再看字元，涵蓋回報方式不一樣的終端機。只認 0–7，其餘交給後面的按鍵處理。
+    /// </summary>
+    private static int? PaneDigit(ConsoleKeyInfo key)
+    {
+        if (key.Modifiers != 0)
+        {
+            return null;
+        }
+
+        return key.Key switch
+        {
+            >= ConsoleKey.D0 and <= ConsoleKey.D7 => key.Key - ConsoleKey.D0,
+            >= ConsoleKey.NumPad0 and <= ConsoleKey.NumPad7 => key.Key - ConsoleKey.NumPad0,
+            _ => key.KeyChar is >= '0' and <= '7' ? key.KeyChar - '0' : null,
+        };
+    }
+
+    private static int PaneOf(DiagView target) => FirstViewPane + (int)target;
+
+    /// <summary>數字鍵：同號再按一次切換放大，換號則選取該面板並回到分割版面。</summary>
+    private void SelectPane(int pane)
+    {
+        if (pane == selectedPane)
+        {
+            zoomed = !zoomed;
+            status = zoomed
+                ? $"放大 {PaneName(pane)}（再按 {pane} 或 Esc 還原）"
+                : "已還原分割版面";
+            return;
+        }
+
+        FocusPane(pane);
+    }
+
+    /// <summary>選取面板並回到分割版面；字母捷徑（m/h/l/t）與數字鍵共用。</summary>
+    private void FocusPane(int pane)
+    {
+        selectedPane = pane;
+        zoomed = false;
+
+        if (pane >= FirstViewPane)
+        {
+            view = (DiagView)(pane - FirstViewPane);
+        }
+    }
+
     private void MoveCursor(int delta)
     {
+        // 選到上排面板時，捲動鍵作用在該面板的內容上（放大後才有足夠高度看出差別）
+        switch (selectedPane)
+        {
+            case 0:
+                // 錯誤清單由上往下讀，往下捲＝位移變大
+                buildScroll = Math.Max(0, buildScroll + delta);
+                return;
+            case 1:
+                // 探測記錄最新的在最下面，與訊息記錄同樣是往上捲看更早的
+                probeScroll = Math.Max(0, probeScroll - delta);
+                return;
+            case 2:
+                // process 面板的內容有界，不需要捲動
+                return;
+        }
+
         switch (view)
         {
             case DiagView.Heap:

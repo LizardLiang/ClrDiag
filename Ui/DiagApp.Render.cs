@@ -6,6 +6,32 @@ namespace ClrDiag.Ui;
 
 public sealed partial class DiagApp
 {
+    /// <summary>面板名稱依編號排列：0–2 是上排面板，3–7 是中間的檢視。</summary>
+    private static readonly string[] PaneNames =
+    {
+        "build",
+        "serve",
+        "process",
+        "記憶體",
+        "堆疊",
+        "執行緒",
+        "記錄",
+        "輸出",
+    };
+
+    private static string PaneName(int pane) => PaneNames[pane];
+
+    /// <summary>面板標題一律帶編號，按鍵與畫面才對得起來；detail 是編號後面的補充說明。</summary>
+    private static string PaneHeader(int pane, string? detail = null) =>
+        $" [[{pane}]] {PaneNames[pane]}{detail} ";
+
+    /// <summary>
+    /// 被選取的面板改用粗框標示。刻意不動框線顏色：顏色已經被拿來表示建置成敗、
+    /// 伺服器存活這類狀態，用它表示選取會蓋掉更重要的資訊。
+    /// </summary>
+    private BoxBorder PaneBorder(int pane) =>
+        selectedPane == pane ? BoxBorder.Heavy : BoxBorder.Rounded;
+
     private IRenderable RenderBuildPanel()
     {
         BuildResult last = build.Last;
@@ -40,8 +66,8 @@ public sealed partial class DiagApp
         }
 
         return new Panel(new Markup(string.Join('\n', rows)))
-            .Header(" build ")
-            .Border(BoxBorder.Rounded)
+            .Header(PaneHeader(0))
+            .Border(PaneBorder(0))
             .BorderColor(
                 build.IsRunning ? Color.Yellow
                 : last.Success ? Color.Green
@@ -50,12 +76,9 @@ public sealed partial class DiagApp
             .Expand();
     }
 
-    private IRenderable RenderServePanel()
-    {
-        ProbeResult? probe = server.LastProbe;
-        ProbeResult[] history = server.ProbeHistory;
-
-        string stateText = server.State switch
+    /// <summary>伺服器狀態的顯示文字；分割版面與放大畫面共用。</summary>
+    private string ServerStateText() =>
+        server.State switch
         {
             ServerState.Running => "[green]RUNNING[/]",
             ServerState.External => "[aqua]EXTERNAL[/]",
@@ -64,9 +87,14 @@ public sealed partial class DiagApp
             _ => $"[{Format.Muted}]STOPPED[/]",
         };
 
+    private IRenderable RenderServePanel()
+    {
+        ProbeResult? probe = server.LastProbe;
+        ProbeResult[] history = server.ProbeHistory;
+
         var rows = new List<string>
         {
-            $"{stateText}  :{server.Port}  PID {(server.ServerPid?.ToString() ?? "-")}",
+            $"{ServerStateText()}  :{server.Port}  PID {(server.ServerPid?.ToString() ?? "-")}",
             $"[{Format.Muted}]{Format.Esc(server.Url)}[/]",
         };
 
@@ -104,8 +132,8 @@ public sealed partial class DiagApp
         }
 
         return new Panel(new Markup(string.Join('\n', rows)))
-            .Header(" serve ")
-            .Border(BoxBorder.Rounded)
+            .Header(PaneHeader(1))
+            .Border(PaneBorder(1))
             .BorderColor(server.ServerPid is not null ? Color.Green : Color.Silver)
             .Expand();
     }
@@ -147,8 +175,8 @@ public sealed partial class DiagApp
         }
 
         return new Panel(new Markup(string.Join('\n', rows)))
-            .Header(" process ")
-            .Border(BoxBorder.Rounded)
+            .Header(PaneHeader(2))
+            .Border(PaneBorder(2))
             .BorderColor(monitor.TargetPid is not null ? Color.Aqua : Color.Silver)
             .Expand();
     }
@@ -158,7 +186,10 @@ public sealed partial class DiagApp
         MetricSample[] history = monitor.History;
         if (history.Length == 0)
         {
-            return Placeholder("等待取樣資料…（先按 s 啟動伺服器或 p 選擇受控行程）");
+            return Placeholder(
+                PaneOf(DiagView.Memory),
+                "等待取樣資料…（先按 s 啟動伺服器或 p 選擇受控行程）"
+            );
         }
 
         MetricSample latest = history[^1];
@@ -261,8 +292,10 @@ public sealed partial class DiagApp
         };
 
         return new Panel(new Rows(content))
-            .Header($" 記憶體走勢（取樣 {history.Length} 筆 / 每秒一次） ")
-            .Border(BoxBorder.Rounded)
+            .Header(
+                PaneHeader(PaneOf(DiagView.Memory), $"走勢（取樣 {history.Length} 筆 / 每秒一次）")
+            )
+            .Border(PaneBorder(PaneOf(DiagView.Memory)))
             .Expand();
     }
 
@@ -324,7 +357,10 @@ public sealed partial class DiagApp
         List<DiagSnapshot> all = heapSnapshots;
         if (all.Count == 0)
         {
-            return Placeholder("尚無快照。按 [bold]n[/] 取得受控堆疊快照（大型站台約需 5–10 秒）");
+            return Placeholder(
+                PaneOf(DiagView.Heap),
+                "尚無快照。按 [bold]n[/] 取得受控堆疊快照（大型站台約需 5–10 秒）"
+            );
         }
 
         DiagSnapshot current = all[^1];
@@ -428,7 +464,10 @@ public sealed partial class DiagApp
             );
         }
 
-        return new Panel(new Rows(content)).Header(" 受控堆疊 ").Border(BoxBorder.Rounded).Expand();
+        return new Panel(new Rows(content))
+            .Header(PaneHeader(PaneOf(DiagView.Heap), "（受控）"))
+            .Border(PaneBorder(PaneOf(DiagView.Heap)))
+            .Expand();
     }
 
     private IRenderable RenderRootPaths()
@@ -460,6 +499,7 @@ public sealed partial class DiagApp
         if (threadsSnapshot is null)
         {
             return Placeholder(
+                PaneOf(DiagView.Threads),
                 "尚無執行緒資料。按 [bold]T[/] 只讀執行緒堆疊（快），或 [bold]n[/] 取完整快照"
             );
         }
@@ -467,7 +507,10 @@ public sealed partial class DiagApp
         List<ManagedThreadInfo> threads = CurrentThreads();
         if (threads.Count == 0)
         {
-            return Placeholder("過濾條件沒有符合的執行緒（按 / 修改，Esc 清除）");
+            return Placeholder(
+                PaneOf(DiagView.Threads),
+                "過濾條件沒有符合的執行緒（按 / 修改，Esc 清除）"
+            );
         }
 
         threadCursor = Math.Clamp(threadCursor, 0, threads.Count - 1);
@@ -565,8 +608,13 @@ public sealed partial class DiagApp
         );
 
         return new Panel(grid)
-            .Header($" 執行緒快照 {threadsSnapshot.TakenAt:HH:mm:ss}（按 T 更新） ")
-            .Border(BoxBorder.Rounded)
+            .Header(
+                PaneHeader(
+                    PaneOf(DiagView.Threads),
+                    $"快照 {threadsSnapshot.TakenAt:HH:mm:ss}（按 T 更新）"
+                )
+            )
+            .Border(PaneBorder(PaneOf(DiagView.Threads)))
             .Expand();
     }
 
@@ -603,9 +651,12 @@ public sealed partial class DiagApp
 
         return new Panel(new Markup(string.Join('\n', lines)))
             .Header(
-                $" 訊息記錄（{all.Length} 筆{(logScroll > 0 ? $"，往上捲 {logScroll}" : string.Empty)}） "
+                PaneHeader(
+                    PaneOf(DiagView.Log),
+                    $"（{all.Length} 筆{(logScroll > 0 ? $"，往上捲 {logScroll}" : string.Empty)}）"
+                )
             )
-            .Border(BoxBorder.Rounded)
+            .Border(PaneBorder(PaneOf(DiagView.Log)))
             .Expand();
     }
 
@@ -649,7 +700,7 @@ public sealed partial class DiagApp
 
         if (lines.Count == 0)
         {
-            return Placeholder(BuildOutputPlaceholder(totalMatches));
+            return Placeholder(PaneOf(DiagView.Output), BuildOutputPlaceholder(totalMatches));
         }
 
         string scope =
@@ -665,9 +716,12 @@ public sealed partial class DiagApp
 
         return new Panel(new Markup(string.Join('\n', lines)))
             .Header(
-                $" 輸出（{totalMatches} 筆{dropped}{scrolled}）  範圍 {scope}   過濾 {filterText} "
+                PaneHeader(
+                    PaneOf(DiagView.Output),
+                    $"（{totalMatches} 筆{dropped}{scrolled}）  範圍 {scope}   過濾 {filterText}"
+                )
             )
-            .Border(BoxBorder.Rounded)
+            .Border(PaneBorder(PaneOf(DiagView.Output)))
             .Expand();
     }
 
@@ -691,14 +745,20 @@ public sealed partial class DiagApp
 
     private IRenderable RenderFooter()
     {
-        string keys = view switch
+        string keys = selectedPane switch
         {
-            DiagView.Heap =>
-                "[bold]n[/] 快照  [bold]d[/] 設基準  [bold]o[/] 排序  [bold]/[/] 過濾  [bold]f[/] 根參考  [bold]e[/] 匯出",
-            DiagView.Threads => "[bold]T[/] 更新堆疊  [bold]↑↓[/] 選擇  [bold]/[/] 過濾",
-            DiagView.Log => "[bold]↑↓[/] 捲動  [bold]PgUp/PgDn[/] 翻頁",
-            DiagView.Output => "[bold]↑↓[/] 捲動  [bold]g[/] PID 範圍  [bold]/[/] 過濾",
-            _ => "[bold]n[/] 快照  [bold]a[/] 自動快照  [bold]p[/] 換行程",
+            0 => "[bold]b[/] 建置  [bold]c[/] 切換設定  [bold]↑↓[/] 捲動錯誤",
+            1 => "[bold]s[/] 啟動  [bold]x[/] 停止  [bold]r[/] 重建重啟  [bold]↑↓[/] 捲動探測記錄",
+            2 => "[bold]p[/] 換行程  [bold]n[/] 快照  [bold]a[/] 自動快照",
+            _ => view switch
+            {
+                DiagView.Heap =>
+                    "[bold]n[/] 快照  [bold]d[/] 設基準  [bold]o[/] 排序  [bold]/[/] 過濾  [bold]f[/] 根參考  [bold]e[/] 匯出",
+                DiagView.Threads => "[bold]T[/] 更新堆疊  [bold]↑↓[/] 選擇  [bold]/[/] 過濾",
+                DiagView.Log => "[bold]↑↓[/] 捲動  [bold]PgUp/PgDn[/] 翻頁",
+                DiagView.Output => "[bold]↑↓[/] 捲動  [bold]g[/] PID 範圍  [bold]/[/] 過濾",
+                _ => "[bold]n[/] 快照  [bold]a[/] 自動快照  [bold]p[/] 換行程",
+            },
         };
 
         // 狀態訊息用終端機預設前景色：這是最新一則結果（快照筆數、建置進度、錯誤），
@@ -710,11 +770,7 @@ public sealed partial class DiagApp
         string busyText = busy is null ? string.Empty : $"[yellow]⏳ {Format.Esc(busy)}[/]  ";
         string autoText = autoSnapshot ? "[green]AUTO[/] " : string.Empty;
 
-        var lines = new[]
-        {
-            $"[bold]1[/] 記憶體  [bold]2[/] 堆疊  [bold]3[/] 執行緒  [bold]4[/] 記錄  [bold]5[/] 輸出  │  [bold]b[/] 建置({Format.Esc(buildConfiguration)})  [bold]c[/] 設定  [bold]s[/] 啟動  [bold]x[/] 停止  [bold]r[/] 重建重啟  [bold]q[/] 離開",
-            $"{busyText}{autoText}{keys}  │  {mode}",
-        };
+        var lines = new[] { PaneLegend(), ActionLine(), $"{busyText}{autoText}{keys}  │  {mode}" };
 
         return new Panel(new Markup(string.Join('\n', lines)))
             .Border(BoxBorder.Rounded)
@@ -722,9 +778,84 @@ public sealed partial class DiagApp
             .Expand();
     }
 
-    private static IRenderable Placeholder(string markup) =>
+    /// <summary>footer 的面板編號；目前選取的那個以 aqua 標示。</summary>
+    private string PaneChip(int pane, bool nameless = false)
+    {
+        string label = nameless ? $"[[{pane}]]" : $"[[{pane}]] {PaneNames[pane]}";
+        return pane == selectedPane ? $"[bold aqua]{label}[/]" : $"[bold]{label}[/]";
+    }
+
+    /// <summary>
+    /// footer 第二列：動作鍵與放大提示。與 PaneLegend 同樣的原則——寧可縮短內容也不換行。
+    /// </summary>
+    private string ActionLine()
+    {
+        string zoomPlain = zoomed
+            ? $"放大中 [{selectedPane}] {PaneName(selectedPane)} · Esc 還原"
+            : "同號鍵放大 · Esc 還原";
+        string zoom = zoomed
+            ? $"[aqua]放大中[/] [[{selectedPane}]] {PaneName(selectedPane)} · [bold]Esc[/] 還原"
+            : "同號鍵放大 · [bold]Esc[/] 還原";
+
+        (string Plain, string Markup)[] candidates =
+        {
+            (
+                $"b 建置({buildConfiguration})  c 設定  s 啟動  x 停止  r 重建重啟  q 離開  │  {zoomPlain}",
+                $"[bold]b[/] 建置({Format.Esc(buildConfiguration)})  [bold]c[/] 設定  [bold]s[/] 啟動  [bold]x[/] 停止  [bold]r[/] 重建重啟  [bold]q[/] 離開  │  {zoom}"
+            ),
+            (
+                $"b 建置 c 設定 s 啟動 x 停止 r 重啟 q 離開  │  {zoomPlain}",
+                $"[bold]b[/] 建置 [bold]c[/] 設定 [bold]s[/] 啟動 [bold]x[/] 停止 [bold]r[/] 重啟 [bold]q[/] 離開  │  {zoom}"
+            ),
+            (zoomPlain, zoom),
+        };
+
+        foreach ((string plain, string markup) in candidates)
+        {
+            if (Format.DisplayWidth(plain) <= ViewWidth - 4)
+            {
+                return markup;
+            }
+        }
+
+        return zoom;
+    }
+
+    /// <summary>
+    /// 八個面板編號排成一列。放不下就逐級壓縮（縮小間距 → 只留編號）而不是讓它換行：
+    /// footer 高度固定五列，換行會把第三列的狀態訊息擠出畫面。
+    /// </summary>
+    private string PaneLegend()
+    {
+        string[] labels = PaneNames.Select((name, i) => $"[{i}] {name}").ToArray();
+        string[] numbers = PaneNames.Select((_, i) => $"[{i}]").ToArray();
+        int available = ViewWidth - 4;
+
+        foreach (
+            (string[] plain, bool nameless, string gap) in new[]
+            {
+                (labels, false, "  "),
+                (labels, false, " "),
+                (numbers, true, " "),
+            }
+        )
+        {
+            if (Format.DisplayWidth(Join(plain, gap)) <= available)
+            {
+                return Join(PaneNames.Select((_, i) => PaneChip(i, nameless)).ToArray(), gap);
+            }
+        }
+
+        return Join(PaneNames.Select((_, i) => PaneChip(i, nameless: true)).ToArray(), " ");
+
+        static string Join(string[] parts, string gap) =>
+            $"{string.Join(gap, parts[..3])}{gap}│{gap}{string.Join(gap, parts[3..])}";
+    }
+
+    private IRenderable Placeholder(int pane, string markup) =>
         new Panel(new Markup($"\n  {markup}\n"))
-            .Border(BoxBorder.Rounded)
+            .Header(PaneHeader(pane))
+            .Border(PaneBorder(pane))
             .BorderColor(Color.Silver)
             .Expand();
 

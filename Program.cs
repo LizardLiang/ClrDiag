@@ -1,6 +1,6 @@
+using System.Reflection;
 using ClrDiag.Core;
 using ClrDiag.Ui;
-using System.Reflection;
 using Spectre.Console;
 
 // clrdiag：終端機版的 .NET 記憶體 / 執行緒診斷主控台（不需要 Visual Studio）
@@ -485,7 +485,11 @@ static async Task<int> RunOutput(int? pid)
 
 static void PrintHelp()
 {
-    string version = Assembly.GetEntryAssembly()?.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown";
+    string version =
+        Assembly
+            .GetEntryAssembly()
+            ?.GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion ?? "unknown";
     // 說明文字含 [--top N] 這類方括號，交給 Spectre 會被當成樣式標記，因此直接輸出純文字
     Console.WriteLine(
         $"""
@@ -502,7 +506,7 @@ static void PrintHelp()
           clrdiag --export              取一次快照並輸出 CSV
           clrdiag --build [Release]     依設定建置一次（不進互動介面）
           clrdiag --output [--pid N]    串流應用程式的 Debug/Trace 輸出（OutputDebugString），Ctrl+C 結束
-          clrdiag --render              把五個檢視渲染成純文字（可貼進問題回報）
+          clrdiag --render              把八個面板渲染成純文字（可貼進問題回報）
           clrdiag --init                在專案根目錄產生 clrdiag.json 範本
           clrdiag --config <path>       指定設定檔
           clrdiag --root <path>         指定專案根目錄
@@ -513,7 +517,9 @@ static void PrintHelp()
           沒有設定檔時會自動偵測 .sln / .csproj，仍可監看、快照、分析既有行程。
 
         互動按鍵
-          1/2/3/4/5  記憶體 / 堆疊 / 執行緒 / 記錄 / 輸出
+          0/1/2      選 build / serve / process 面板
+          3/4/5/6/7  選 記憶體 / 堆疊 / 執行緒 / 記錄 / 輸出
+                     同一個數字再按一次＝放大該面板（Esc 或同號鍵還原）；上排數字與數字鍵盤都可用
           b 建置    c 切換設定    s 啟動    x 停止    r 重建並重啟
           n 取快照  T 只更新執行緒堆疊    d 設比較基準（Shift+D 清除）    a 自動快照
           o 切換排序  / 過濾型別  f 找出根參考鏈  e 匯出 CSV  p 切換行程
