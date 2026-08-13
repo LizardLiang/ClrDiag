@@ -19,6 +19,7 @@
     <Version>0.2.0</Version>
     <Description>Windows x64 .NET memory and thread diagnostics console.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
   </PropertyGroup>
 
