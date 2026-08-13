@@ -17,13 +17,67 @@ public sealed partial class DiagApp
         "執行緒",
         "記錄",
         "輸出",
+        "偵錯",
     };
 
     private static string PaneName(int pane) => PaneNames[pane];
 
-    /// <summary>面板標題一律帶編號，按鍵與畫面才對得起來；detail 是編號後面的補充說明。</summary>
+    /// <summary>主區分頁的面板編號（3–7）。</summary>
+    private static IEnumerable<int> ViewPanes =>
+        Enumerable.Range(FirstViewPane, PaneNames.Length - FirstViewPane);
+
+    /// <summary>上排面板的標題一律帶編號，按鍵與畫面才對得起來；detail 是編號後面的補充說明。</summary>
     private static string PaneHeader(int pane, string? detail = null) =>
         $" [[{pane}]] {PaneNames[pane]}{detail} ";
+
+    /// <summary>
+    /// 檢視面板的標題不帶編號：編號已經由主區上方的分頁列標示，重複一次只是佔位置。
+    /// 標題留下名稱與補充說明（取樣筆數、快照時間、過濾條件這些會變動的資訊）。
+    /// </summary>
+    private static string ViewHeader(int pane, string? detail = null) =>
+        $" {PaneNames[pane]}{detail} ";
+
+    /// <summary>
+    /// 主區上方的分頁列。作用中的分頁用 aqua 粗體加底線，未選的用一般前景色而非壓暗——
+    /// 「還有哪些分頁可以按」正是這一列存在的理由，壓暗等於把它藏起來。
+    /// 放不下就逐級壓縮（縮小分隔 → 只留編號）而不是換行，理由同 footer 的 PaneLegend。
+    /// </summary>
+    private IRenderable RenderViewTabs()
+    {
+        int active = PaneOf(view);
+        int[] panes = ViewPanes.ToArray();
+
+        static string Label(int pane, bool nameless) =>
+            nameless ? $"{pane}" : $"{pane} {PaneNames[pane]}";
+
+        (bool Nameless, string Gap) style = (false, " │ ");
+        foreach ((bool nameless, string gap) in new[] { (false, " │ "), (false, "│"), (true, "  ") })
+        {
+            style = (nameless, gap);
+            if (
+                nameless
+                || Format.DisplayWidth(string.Join(gap, panes.Select(p => Label(p, nameless))))
+                    <= ViewWidth - 2
+            )
+            {
+                break;
+            }
+        }
+
+        string separator = $"[{Format.Muted}]{style.Gap}[/]";
+        string tabs = string.Join(
+            separator,
+            panes.Select(pane =>
+            {
+                string label = Label(pane, style.Nameless);
+                return pane == active
+                    ? $"[bold aqua underline]{label}[/]"
+                    : $"[bold]{label}[/]";
+            })
+        );
+
+        return new Markup($" {tabs}");
+    }
 
     /// <summary>
     /// 被選取的面板改用粗框標示。刻意不動框線顏色：顏色已經被拿來表示建置成敗、
@@ -81,6 +135,7 @@ public sealed partial class DiagApp
         server.State switch
         {
             ServerState.Running => "[green]RUNNING[/]",
+            ServerState.Debug => "[aqua]RUNNING (debug)[/]",
             ServerState.External => "[aqua]EXTERNAL[/]",
             ServerState.Starting => "[yellow]STARTING[/]",
             ServerState.Stopping => "[yellow]STOPPING[/]",
@@ -293,7 +348,7 @@ public sealed partial class DiagApp
 
         return new Panel(new Rows(content))
             .Header(
-                PaneHeader(PaneOf(DiagView.Memory), $"走勢（取樣 {history.Length} 筆 / 每秒一次）")
+                ViewHeader(PaneOf(DiagView.Memory), $"走勢（取樣 {history.Length} 筆 / 每秒一次）")
             )
             .Border(PaneBorder(PaneOf(DiagView.Memory)))
             .Expand();
@@ -465,7 +520,7 @@ public sealed partial class DiagApp
         }
 
         return new Panel(new Rows(content))
-            .Header(PaneHeader(PaneOf(DiagView.Heap), "（受控）"))
+            .Header(ViewHeader(PaneOf(DiagView.Heap), "（受控）"))
             .Border(PaneBorder(PaneOf(DiagView.Heap)))
             .Expand();
     }
@@ -609,12 +664,169 @@ public sealed partial class DiagApp
 
         return new Panel(grid)
             .Header(
-                PaneHeader(
+                ViewHeader(
                     PaneOf(DiagView.Threads),
                     $"快照 {threadsSnapshot.TakenAt:HH:mm:ss}（按 T 更新）"
                 )
             )
             .Border(PaneBorder(PaneOf(DiagView.Threads)))
+            .Expand();
+    }
+
+    private string DebugStateText() =>
+        dap.State switch
+        {
+            DebugSessionState.Halted => "[yellow]HALTED[/]",
+            DebugSessionState.Running => "[green]RUNNING[/]",
+            DebugSessionState.Connecting => "[yellow]CONNECTING[/]",
+            DebugSessionState.Failed => "[red]FAILED[/]",
+            DebugSessionState.Terminated => $"[{Format.Muted}]TERMINATED[/]",
+            _ => $"[{Format.Muted}]IDLE[/]",
+        };
+
+    /// <summary>
+    /// 未中斷時顯示中斷點與監看清單（含 verified 狀態，見「來源路徑比對」假設——unbound
+    /// 中斷點必須可見，不能悄悄失效）；中斷時改成兩欄配置，仿 RenderThreadsView：
+    /// 呼叫堆疊在左，選取框架的區域變數＋監看結果在右。
+    /// </summary>
+    private IRenderable RenderDebugView()
+    {
+        DebugHaltedState? halted = dap.Halted;
+        IReadOnlyList<DebugBreakpoint> breakpoints = dap.Breakpoints;
+        IReadOnlyList<DebugWatch> watches = dap.Watches;
+
+        if (halted is null)
+        {
+            var lines = new List<string>
+            {
+                $"狀態 {DebugStateText()}   {(dap.DebuggeePid is { } pid ? $"PID {pid}" : $"[{Format.Muted}]尚未附加[/]")}   {(dap.IsConnected ? (dap.IsLaunchMode ? "啟動模式" : "附加模式") : $"[{Format.Muted}]未連線[/]")}",
+            };
+
+            if (dap.LastError is { } err)
+            {
+                lines.Add($"[red]{Format.Esc(Truncate(err, Math.Max(20, ViewWidth - 10)))}[/]");
+            }
+
+            lines.Add(string.Empty);
+            lines.Add($"[bold]中斷點[/]（{breakpoints.Count}）");
+            if (breakpoints.Count == 0)
+            {
+                lines.Add($"[{Format.Muted}]尚無中斷點。從 Neovim 設定，或用 clrdiag --send 手動測試[/]");
+            }
+            else
+            {
+                foreach (DebugBreakpoint b in breakpoints)
+                {
+                    // verified:false 一律顯眼標示——來源路徑比對錯誤是中斷點悄悄失效最常見的原因
+                    string mark = b.Verified ? "[green]●[/]" : "[yellow]○ 未驗證[/]";
+                    string loc = $"{Format.ShortType(Path.GetFileName(b.Path), 30)}:{b.Line}";
+                    string msg = b.Message is null
+                        ? string.Empty
+                        : $"  [yellow]{Format.Esc(Truncate(b.Message, 50))}[/]";
+                    lines.Add($"{mark} {Format.Esc(loc)}{msg}");
+                }
+            }
+
+            lines.Add(string.Empty);
+            lines.Add($"[bold]監看[/]（{watches.Count}）");
+            if (watches.Count == 0)
+            {
+                lines.Add($"[{Format.Muted}]尚無監看運算式（按 w 新增）[/]");
+            }
+            else
+            {
+                foreach (DebugWatch w in watches)
+                {
+                    lines.Add($"{Format.Esc(w.Expression)}  [{Format.Muted}](中斷後才會求值)[/]");
+                }
+            }
+
+            return new Panel(new Markup(string.Join('\n', lines)))
+                .Header(ViewHeader(PaneOf(DiagView.Debug)))
+                .Border(PaneBorder(PaneOf(DiagView.Debug)))
+                .Expand();
+        }
+
+        List<DebugFrame> frames = halted.Frames.ToList();
+        int listWidth = Math.Max(30, ViewWidth * 2 / 5);
+        int frameNameWidth = Math.Max(12, listWidth - 6);
+
+        var frameList = new Table().Border(TableBorder.None).Expand();
+        frameList.AddColumn(new TableColumn($"[{Format.Muted}]呼叫堆疊[/]").NoWrap());
+
+        for (int i = 0; i < frames.Count; i++)
+        {
+            DebugFrame f = frames[i];
+            bool isSelected = i == halted.SelectedFrameIndex;
+            string open = isSelected ? "[invert]" : string.Empty;
+            string close = isSelected ? "[/]" : string.Empty;
+
+            // 沒有 ClrMD 型別可用，直接把 DAP 的框架名稱字串套進同一套判斷／裁切邏輯
+            bool own = appCode.IsAppFrame(f.Name);
+            string marker = own ? "[bold]●[/]" : " ";
+            string text = Format.Esc(Format.TailFrame(f.Name, frameNameWidth));
+            frameList.AddRow($"{marker}{open}{text}{close}");
+        }
+
+        var rightLines = new List<string>
+        {
+            $"執行緒 {halted.ThreadId}  停止原因 [yellow]{Format.Esc(halted.Reason)}[/]",
+            string.Empty,
+            $"[bold]區域變數[/]（{halted.Locals.Count}）",
+        };
+
+        if (halted.Locals.Count == 0)
+        {
+            rightLines.Add($"[{Format.Muted}](沒有區域變數)[/]");
+        }
+        else
+        {
+            foreach (DebugVariable v in halted.Locals)
+            {
+                rightLines.Add(
+                    $"{Format.Esc(v.Name)} = {Format.Esc(Truncate(v.Value, 50))}  [{Format.Muted}]{Format.Esc(v.Type)}[/]"
+                );
+            }
+        }
+
+        rightLines.Add(string.Empty);
+        rightLines.Add($"[bold]監看[/]（{halted.Watches.Count}，按 w 新增/移除）");
+        if (halted.Watches.Count == 0)
+        {
+            rightLines.Add($"[{Format.Muted}]尚無監看運算式[/]");
+        }
+        else
+        {
+            foreach (WatchResult w in halted.Watches)
+            {
+                string value = w.TimedOut
+                    ? "[yellow]逾時[/]"
+                    : w.Error is not null
+                        ? $"[red]{Format.Esc(Truncate(w.Error, 40))}[/]"
+                        : Format.Esc(Truncate(w.Value ?? "null", 50));
+                rightLines.Add($"{Format.Esc(w.Expression)} = {value}");
+            }
+        }
+
+        var grid = new Grid();
+        grid.AddColumn(new GridColumn().Width(listWidth));
+        grid.AddColumn(new GridColumn());
+        grid.AddRow(
+            new Panel(frameList).Header(" 呼叫堆疊 ").Border(BoxBorder.Rounded).Expand(),
+            new Panel(new Markup(string.Join('\n', rightLines)))
+                .Header(" 區域變數／監看 ")
+                .Border(BoxBorder.Rounded)
+                .Expand()
+        );
+
+        return new Panel(grid)
+            .Header(
+                ViewHeader(
+                    PaneOf(DiagView.Debug),
+                    $"（已中斷，PID {dap.DebuggeePid?.ToString() ?? "?"}）"
+                )
+            )
+            .Border(PaneBorder(PaneOf(DiagView.Debug)))
             .Expand();
     }
 
@@ -651,7 +863,7 @@ public sealed partial class DiagApp
 
         return new Panel(new Markup(string.Join('\n', lines)))
             .Header(
-                PaneHeader(
+                ViewHeader(
                     PaneOf(DiagView.Log),
                     $"（{all.Length} 筆{(logScroll > 0 ? $"，往上捲 {logScroll}" : string.Empty)}）"
                 )
@@ -716,7 +928,7 @@ public sealed partial class DiagApp
 
         return new Panel(new Markup(string.Join('\n', lines)))
             .Header(
-                PaneHeader(
+                ViewHeader(
                     PaneOf(DiagView.Output),
                     $"（{totalMatches} 筆{dropped}{scrolled}）  範圍 {scope}   過濾 {filterText}"
                 )
@@ -743,12 +955,12 @@ public sealed partial class DiagApp
             : "（尚無可顯示的內容）";
     }
 
-    private IRenderable RenderFooter()
-    {
-        string keys = selectedPane switch
+    /// <summary>目前選取的面板／分頁專屬的按鍵。</summary>
+    private string PaneKeys() =>
+        selectedPane switch
         {
             0 => "[bold]b[/] 建置  [bold]c[/] 切換設定  [bold]↑↓[/] 捲動錯誤",
-            1 => "[bold]s[/] 啟動  [bold]x[/] 停止  [bold]r[/] 重建重啟  [bold]↑↓[/] 捲動探測記錄",
+            1 => "[bold]s[/] 啟動  [bold]Shift+S[/] 準備除錯啟動  [bold]x[/] 停止  [bold]r[/] 重建重啟  [bold]↑↓[/] 捲動探測記錄",
             2 => "[bold]p[/] 換行程  [bold]n[/] 快照  [bold]a[/] 自動快照",
             _ => view switch
             {
@@ -757,104 +969,81 @@ public sealed partial class DiagApp
                 DiagView.Threads => "[bold]T[/] 更新堆疊  [bold]↑↓[/] 選擇  [bold]/[/] 過濾",
                 DiagView.Log => "[bold]↑↓[/] 捲動  [bold]PgUp/PgDn[/] 翻頁",
                 DiagView.Output => "[bold]↑↓[/] 捲動  [bold]g[/] PID 範圍  [bold]/[/] 過濾",
+                DiagView.Debug =>
+                    "[bold]F5[/] 續行  [bold]F10[/] 下一步  [bold]F11[/] 進入  [bold]Shift+F11[/] 跳出  [bold]F6[/] 暫停  [bold]w[/] 監看  [bold]↑↓[/] 選框架",
                 _ => "[bold]n[/] 快照  [bold]a[/] 自動快照  [bold]p[/] 換行程",
             },
         };
 
+    /// <summary>
+    /// footer 內容只有一列。面板編號不列在這裡：上排面板的標題自己帶編號，主區分頁列也標了編號。
+    /// 放不下時按重要性讓位：先丟全域按鍵、再丟目前面板的按鍵，狀態訊息永遠留著
+    /// （那是最新一則結果）。完整按鍵表按 ? 看，不需要常駐佔位置。
+    /// </summary>
+    private IRenderable RenderFooter()
+    {
         // 狀態訊息用終端機預設前景色：這是最新一則結果（快照筆數、建置進度、錯誤），
         // 是要讀的正文，不該被當成裝飾壓暗。
-        string mode = filterMode
-            ? $"[yellow]過濾輸入:[/] {Format.Esc(filter)}[blink]_[/]"
-            : Format.Esc(status);
+        string mode = watchInputMode
+            ? $"[yellow]監看運算式:[/] {Format.Esc(watchInput)}[blink]_[/]"
+            : filterMode
+                ? $"[yellow]過濾輸入:[/] {Format.Esc(filter)}[blink]_[/]"
+                : Format.Esc(status);
 
-        string busyText = busy is null ? string.Empty : $"[yellow]⏳ {Format.Esc(busy)}[/]  ";
-        string autoText = autoSnapshot ? "[green]AUTO[/] " : string.Empty;
+        // 前綴是「現在發生什麼事」的狀態指示，不是按鍵提示，任何寬度下都不讓位
+        var prefix = new List<string>();
+        if (busy is { } busyText)
+        {
+            prefix.Add($"[yellow]⏳ {Format.Esc(busyText)}[/]");
+        }
 
-        var lines = new[] { PaneLegend(), ActionLine(), $"{busyText}{autoText}{keys}  │  {mode}" };
+        if (autoSnapshot)
+        {
+            prefix.Add("[green]AUTO[/]");
+        }
 
-        return new Panel(new Markup(string.Join('\n', lines)))
+        if (debugArmed)
+        {
+            prefix.Add("[aqua]除錯啟動已準備[/]");
+        }
+
+        if (zoomed)
+        {
+            prefix.Add($"[aqua]放大[/] {PaneName(selectedPane)} [bold]Esc[/] 還原");
+        }
+
+        string globalKeys =
+            $"[bold]b[/] 建置({Format.Esc(buildConfiguration)})  [bold]c[/] 設定  [bold]s[/] 啟動  [bold]x[/] 停止  [bold]r[/] 重建重啟  [bold]?[/] 說明  [bold]q[/] 離開";
+
+        string[][] tiers =
+        {
+            new[] { PaneKeys(), globalKeys, mode },
+            new[] { PaneKeys(), mode },
+            new[] { mode },
+        };
+
+        string line = string.Empty;
+        foreach (string[] tier in tiers)
+        {
+            line = string.Join($"[{Format.Muted}]  │  [/]", prefix.Concat(tier));
+
+            // 扣掉框線與左右內距各兩格，否則算得下卻會被框線擠成兩列
+            if (Format.MarkupWidth(line) <= ViewWidth - 4)
+            {
+                break;
+            }
+        }
+
+        // 最精簡的一級仍可能超寬（狀態訊息本身很長），讓終端機截掉；截狀態也好過不顯示
+        return new Panel(new Markup(line))
             .Border(BoxBorder.Rounded)
             .BorderColor(Color.Silver)
             .Expand();
     }
 
-    /// <summary>footer 的面板編號；目前選取的那個以 aqua 標示。</summary>
-    private string PaneChip(int pane, bool nameless = false)
-    {
-        string label = nameless ? $"[[{pane}]]" : $"[[{pane}]] {PaneNames[pane]}";
-        return pane == selectedPane ? $"[bold aqua]{label}[/]" : $"[bold]{label}[/]";
-    }
-
-    /// <summary>
-    /// footer 第二列：動作鍵與放大提示。與 PaneLegend 同樣的原則——寧可縮短內容也不換行。
-    /// </summary>
-    private string ActionLine()
-    {
-        string zoomPlain = zoomed
-            ? $"放大中 [{selectedPane}] {PaneName(selectedPane)} · Esc 還原"
-            : "同號鍵放大 · Esc 還原";
-        string zoom = zoomed
-            ? $"[aqua]放大中[/] [[{selectedPane}]] {PaneName(selectedPane)} · [bold]Esc[/] 還原"
-            : "同號鍵放大 · [bold]Esc[/] 還原";
-
-        (string Plain, string Markup)[] candidates =
-        {
-            (
-                $"b 建置({buildConfiguration})  c 設定  s 啟動  x 停止  r 重建重啟  q 離開  │  {zoomPlain}",
-                $"[bold]b[/] 建置({Format.Esc(buildConfiguration)})  [bold]c[/] 設定  [bold]s[/] 啟動  [bold]x[/] 停止  [bold]r[/] 重建重啟  [bold]q[/] 離開  │  {zoom}"
-            ),
-            (
-                $"b 建置 c 設定 s 啟動 x 停止 r 重啟 q 離開  │  {zoomPlain}",
-                $"[bold]b[/] 建置 [bold]c[/] 設定 [bold]s[/] 啟動 [bold]x[/] 停止 [bold]r[/] 重啟 [bold]q[/] 離開  │  {zoom}"
-            ),
-            (zoomPlain, zoom),
-        };
-
-        foreach ((string plain, string markup) in candidates)
-        {
-            if (Format.DisplayWidth(plain) <= ViewWidth - 4)
-            {
-                return markup;
-            }
-        }
-
-        return zoom;
-    }
-
-    /// <summary>
-    /// 八個面板編號排成一列。放不下就逐級壓縮（縮小間距 → 只留編號）而不是讓它換行：
-    /// footer 高度固定五列，換行會把第三列的狀態訊息擠出畫面。
-    /// </summary>
-    private string PaneLegend()
-    {
-        string[] labels = PaneNames.Select((name, i) => $"[{i}] {name}").ToArray();
-        string[] numbers = PaneNames.Select((_, i) => $"[{i}]").ToArray();
-        int available = ViewWidth - 4;
-
-        foreach (
-            (string[] plain, bool nameless, string gap) in new[]
-            {
-                (labels, false, "  "),
-                (labels, false, " "),
-                (numbers, true, " "),
-            }
-        )
-        {
-            if (Format.DisplayWidth(Join(plain, gap)) <= available)
-            {
-                return Join(PaneNames.Select((_, i) => PaneChip(i, nameless)).ToArray(), gap);
-            }
-        }
-
-        return Join(PaneNames.Select((_, i) => PaneChip(i, nameless: true)).ToArray(), " ");
-
-        static string Join(string[] parts, string gap) =>
-            $"{string.Join(gap, parts[..3])}{gap}│{gap}{string.Join(gap, parts[3..])}";
-    }
-
     private IRenderable Placeholder(int pane, string markup) =>
         new Panel(new Markup($"\n  {markup}\n"))
-            .Header(PaneHeader(pane))
+            .Header(pane < FirstViewPane ? PaneHeader(pane) : ViewHeader(pane))
             .Border(PaneBorder(pane))
             .BorderColor(Color.Silver)
             .Expand();

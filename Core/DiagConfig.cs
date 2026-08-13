@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -60,6 +61,41 @@ public sealed record DiagConfig
     /// <summary>CSV 報告輸出目錄，相對於 Root。</summary>
     public string ReportDirectory { get; init; } = ".clrdiag-reports";
 
+    // --- 除錯（DAP） ---
+
+    /// <summary>是否啟用除錯功能（spawn netcoredbg、開具名管道指令通道）。預設開啟，可關閉。</summary>
+    public bool DapEnabled { get; init; } = true;
+
+    /// <summary>netcoredbg 執行檔路徑。null = 自動解析（PATH → mason 預設安裝路徑）。</summary>
+    public string? DapAdapterPath { get; init; }
+
+    /// <summary>
+    /// 啟動時要載入的中斷點初始清單，格式 "路徑:行號"（例: "C:/App/Program.cs:42"）。
+    /// 純粹是「下次啟動的初始值」，執行期用 Neovim 或 TUI 新增／移除的變更不會寫回這裡——
+    /// 與 buildConfiguration 等其他欄位一致，設定檔只在啟動時讀一次。
+    /// </summary>
+    public string[] DapBreakpoints { get; init; } = Array.Empty<string>();
+
+    /// <summary>啟動時要載入的監看運算式初始清單。</summary>
+    public string[] DapWatches { get; init; } = Array.Empty<string>();
+
+    /// <summary>把 DapBreakpoints 的 "路徑:行號" 字串解析成結構化資料；格式錯誤的項目直接略過。</summary>
+    [JsonIgnore]
+    public IEnumerable<(string Path, int Line)> ParsedDapBreakpoints =>
+        DapBreakpoints
+            .Select(spec =>
+            {
+                int colon = spec.LastIndexOf(':');
+                if (colon <= 0 || !int.TryParse(spec[(colon + 1)..], out int line))
+                {
+                    return ((string Path, int Line)?)null;
+                }
+
+                return (spec[..colon], line);
+            })
+            .Where(parsed => parsed is not null)
+            .Select(parsed => parsed!.Value);
+
     // --- 衍生值 ---
 
     [JsonIgnore]
@@ -78,6 +114,21 @@ public sealed record DiagConfig
 
     [JsonIgnore]
     public bool CanServe => ServeCommand is not null;
+
+    /// <summary>
+    /// serveCommand 是否為「wrapper」型指令——執行檔本身不是目標 app，而是會再開一個子行程
+    /// 才跑真正的程式。目前只認 `dotnet run`（本文件範例的預設寫法，也是最常見的情形）；
+    /// 這種指令直接交給 netcoredbg 的 `launch` 只會附加到 wrapper 本身，wrapper 另外開的
+    /// 子行程完全不受除錯器控制，中斷點永遠不會命中。真正需要在除錯器下啟動時
+    /// （ServerService.StartUnderDebuggerAsync）要改走「啟動 wrapper → 找子行程 → attach」，
+    /// 見 Ui/DiagApp.Actions.cs 的 LaunchServerUnderDebuggerAsync。
+    /// </summary>
+    [JsonIgnore]
+    public bool IsWrapperServeCommand =>
+        ServeCommand is not null
+        && Path.GetFileNameWithoutExtension(ServeCommand)
+            .Equals("dotnet", StringComparison.OrdinalIgnoreCase)
+        && (ServeArguments?.FirstOrDefault()?.Equals("run", StringComparison.OrdinalIgnoreCase) ?? false);
 
     [JsonIgnore]
     public string? ResolvedBuildProject { get; private set; }

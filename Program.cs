@@ -1,5 +1,8 @@
+using System.IO.Pipes;
 using System.Reflection;
+using System.Text;
 using ClrDiag.Core;
+using ClrDiag.Core.Dap;
 using ClrDiag.Ui;
 using Spectre.Console;
 
@@ -22,6 +25,9 @@ bool exportMode = false;
 bool initMode = false;
 bool listMode = false;
 bool buildMode = false;
+bool dapMode = false;
+bool pipeNameMode = false;
+string? sendCommand = null;
 string? buildConfiguration = null;
 int renderWidth = 120;
 int renderHeight = 40;
@@ -55,6 +61,15 @@ for (int i = 0; i < args.Length; i++)
             break;
         case "--output":
             outputMode = true;
+            break;
+        case "--dap":
+            dapMode = true;
+            break;
+        case "--send" when i + 1 < args.Length:
+            sendCommand = args[++i];
+            break;
+        case "--pipe-name":
+            pipeNameMode = true;
             break;
         case "--render":
             renderMode = true;
@@ -95,6 +110,18 @@ for (int i = 0; i < args.Length; i++)
             PrintHelp();
             return 2;
     }
+}
+
+// 這幾個非互動批次模式（設計上就是給重新導向到檔案／管線，或代理程式讀取用）必須輸出 UTF-8：
+// 不主動設定的話 Console 會沿用作業系統目前的主控台字碼頁（繁體中文 Windows 預設是 Big5 950），
+// 寫進檔案後任何用 UTF-8 讀取的消費端（例如本檔案）看到的都是亂碼。互動式儀表板刻意不套用這段，
+// 免得動到 Spectre.Console 畫框線／版面時的終端機能力偵測。一定要搶在第一次呼叫 AnsiConsole
+// 之前設定——包括下面 DiagConfig.Load 失敗時的錯誤訊息——Spectre 的 Profile 是第一次使用時
+// 惰性建立並快取，事後才改字碼頁不會讓已經印出的內容或已快取的判斷跟著變。
+bool batchOutputMode = dapMode || snapshotMode || threadMode || rootsType is not null || renderMode || outputMode;
+if (batchOutputMode)
+{
+    Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 }
 
 DiagConfig config;
@@ -157,6 +184,27 @@ if (outputMode)
     return await RunOutput(pid);
 }
 
+// 只印出目前專案對應的具名管道名稱：編輯器外掛（例如 Neovim Lua 客戶端）用這個做一次性
+// 發現，不必自己重新實作一份雜湊邏輯而跟本體的演算法兜不起來
+if (pipeNameMode)
+{
+    Console.WriteLine(DebugCommandServer.PipeNameFor(config.Root));
+    return 0;
+}
+
+// 對本機（或 --pid 對應目標）專案的除錯指令管道送一個指令、印出回覆後結束
+// ——VS Code 的過渡方案，也是這個通道最方便手動測試的入口
+if (sendCommand is not null)
+{
+    return await RunSend(config, sendCommand);
+}
+
+// 非互動除錯：附加到目標、開具名管道（讓 Neovim／--send 可以下指令），每次中斷印出區塊
+if (dapMode)
+{
+    return await RunDap(config, pid);
+}
+
 if (rootsType is not null)
 {
     return RunRootPaths(config, pid, rootsType);
@@ -217,7 +265,25 @@ if (Console.IsOutputRedirected)
 }
 
 using var app = new DiagApp(config, effectivePort);
-app.Run(pid);
+
+// 攔截 Ctrl+C 走一般的收尾流程（斷開除錯階段、砍掉 netcoredbg），而不是讓執行階段直接強制結束——
+// 同 RunOutput 的教訓，直接讓行程被砍掉會跳過 DiagApp.Dispose，留下孤兒的 netcoredbg 子行程。
+ConsoleCancelEventHandler onCancel = (_, e) =>
+{
+    e.Cancel = true;
+    app.RequestExit();
+};
+Console.CancelKeyPress += onCancel;
+
+try
+{
+    app.Run(pid);
+}
+finally
+{
+    Console.CancelKeyPress -= onCancel;
+}
+
 return 0;
 
 /// <summary>解析要監看的行程；找不到時輸出可用的候選清單，而不是只說「找不到」。</summary>
@@ -432,6 +498,205 @@ static int RunRootPaths(DiagConfig config, int? pid, string typeName)
 }
 
 /// <summary>
+/// 對專案的除錯指令管道送一個指令、印出回覆後結束。這是最方便手動測試通道的入口，
+/// 也是 VS Code 在專屬擴充套件（規劃中的後續階段）完成前的過渡方案——綁一個鍵跑
+/// clrdiag --send 就能設中斷點。
+/// </summary>
+static async Task<int> RunSend(DiagConfig config, string commandJson)
+{
+    string pipeName = DebugCommandServer.PipeNameFor(config.Root);
+    try
+    {
+        using var client = new NamedPipeClientStream(
+            ".",
+            pipeName,
+            PipeDirection.InOut,
+            PipeOptions.Asynchronous
+        );
+        await client.ConnectAsync(5000).ConfigureAwait(false);
+
+        using var reader = new StreamReader(client, Encoding.UTF8, false, 4096, leaveOpen: true);
+        var writer = new StreamWriter(client, new UTF8Encoding(false), 4096, leaveOpen: true)
+        {
+            AutoFlush = true,
+            NewLine = "\n",
+        };
+
+        // 一連上就會先收到一次目前狀態（不是這次指令的回覆），讀掉但不印出
+        await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+
+        await writer.WriteLineAsync(commandJson).ConfigureAwait(false);
+        string? reply = await reader
+            .ReadLineAsync()
+            .WaitAsync(TimeSpan.FromSeconds(10))
+            .ConfigureAwait(false);
+
+        if (reply is null)
+        {
+            AnsiConsole.MarkupLine("[red]管道在等待回覆時關閉[/]");
+            return 1;
+        }
+
+        Console.WriteLine(reply);
+        return 0;
+    }
+    catch (TimeoutException)
+    {
+        AnsiConsole.MarkupLine($"[red]連線逾時:[/] \\\\.\\pipe\\{Markup.Escape(pipeName)}");
+        AnsiConsole.MarkupLine(
+            "確認 ClrDiag 是否正在這個專案目錄下執行、且未以 dapEnabled:false 停用除錯功能"
+        );
+        return 1;
+    }
+    catch (Exception ex)
+    {
+        AnsiConsole.MarkupLine($"[red]連線失敗:[/] {Markup.Escape(ex.Message)}");
+        return 1;
+    }
+}
+
+/// <summary>
+/// 非互動除錯：附加到目標行程、開具名管道通道（讓 Neovim 或 clrdiag --send 可以下指令），
+/// 每次真正的中斷都把當下的堆疊／區域變數／監看印成一個區塊，格式比照 --threads／--render
+/// 的風格；同一次中斷內因為新增/移除監看而重新整理，只印一行異動提示，不重印整個區塊
+///（靠 DebugHaltedState.Generation 分辨，不是物件參考——每次重新整理都會產生新物件，
+/// 參考比對永遠不相等）。真正的執行控制仍然來自通道，這裡只負責觀察與印出，可直接用
+/// &gt; file 導向保存。Ctrl+C 乾淨結束（斷開除錯階段、砍掉 netcoredbg）。
+/// </summary>
+static async Task<int> RunDap(DiagConfig config, int? pid)
+{
+    int? target = ResolveTarget(config, pid);
+    if (target is null)
+    {
+        return 1;
+    }
+
+    var log = new LogBuffer();
+    using var session = new DapSessionService(log);
+    session.SeedFromConfig(config.ParsedDapBreakpoints, config.DapWatches);
+
+    using DebugCommandServer? pipe = config.DapEnabled
+        ? new DebugCommandServer(session, log, DebugCommandServer.PipeNameFor(config.Root))
+        : null;
+    pipe?.Start();
+
+    DebugHaltedState? lastPrinted = null;
+    session.StateChanged += () =>
+    {
+        DebugHaltedState? current = session.Halted;
+        if (current is null || session.State != DebugSessionState.Halted)
+        {
+            return;
+        }
+
+        if (lastPrinted is not null && current.Generation == lastPrinted.Generation)
+        {
+            // 同一次中斷的資料更新（例如中斷中新增了監看），不是新的中斷事件
+            PrintWatchDelta(lastPrinted, current);
+            lastPrinted = current;
+            return;
+        }
+
+        lastPrinted = current;
+        PrintHaltBlock(target.Value, current);
+    };
+
+    AnsiConsole.MarkupLine(
+        $"[green]開始非互動除錯[/]（PID {target}），中斷點與監看透過具名管道或 Neovim 設定，Ctrl+C 結束"
+    );
+
+    bool ok = await session
+        .AttachAsync(target.Value, config.DapAdapterPath, CancellationToken.None)
+        .ConfigureAwait(false);
+    if (!ok)
+    {
+        AnsiConsole.MarkupLine($"[red]附加除錯器失敗:[/] {Markup.Escape(session.LastError ?? "未知錯誤")}");
+        return 1;
+    }
+
+    var stop = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+    ConsoleCancelEventHandler onCancel = (_, e) =>
+    {
+        e.Cancel = true;
+        stop.TrySetResult(0);
+    };
+
+    Console.CancelKeyPress += onCancel;
+    try
+    {
+        return await stop.Task.ConfigureAwait(false);
+    }
+    finally
+    {
+        Console.CancelKeyPress -= onCancel;
+        await session.DisconnectAsync(CancellationToken.None).ConfigureAwait(false);
+    }
+}
+
+/// <summary>把一次中斷的堆疊／區域變數／監看印成人類可讀的區塊，風格比照 RunHeadless。</summary>
+static void PrintHaltBlock(int pid, DebugHaltedState halted)
+{
+    AnsiConsole.MarkupLine(
+        $"[bold]PID {pid}[/]  中斷: [yellow]{Markup.Escape(halted.Reason)}[/]（執行緒 {halted.ThreadId}）  {DateTime.Now:HH:mm:ss}"
+    );
+
+    for (int i = 0; i < halted.Frames.Count; i++)
+    {
+        DebugFrame frame = halted.Frames[i];
+        string marker = i == halted.SelectedFrameIndex ? "→" : " ";
+        AnsiConsole.MarkupLine(
+            $"  {marker} {Markup.Escape(frame.Name)}  {Markup.Escape(frame.SourcePath ?? "?")}:{frame.Line}"
+        );
+    }
+
+    AnsiConsole.MarkupLine($"[bold]區域變數[/] ({halted.Locals.Count})");
+    foreach (DebugVariable local in halted.Locals)
+    {
+        AnsiConsole.MarkupLine(
+            $"    {Markup.Escape(local.Name)} = {Markup.Escape(local.Value)} ({Markup.Escape(local.Type)})"
+        );
+    }
+
+    if (halted.Watches.Count > 0)
+    {
+        AnsiConsole.MarkupLine($"[bold]監看[/] ({halted.Watches.Count})");
+        foreach (WatchResult watch in halted.Watches)
+        {
+            string value = watch.TimedOut ? "逾時" : watch.Error ?? watch.Value ?? "null";
+            AnsiConsole.MarkupLine($"    {Markup.Escape(watch.Expression)} = {Markup.Escape(value)}");
+        }
+    }
+
+    AnsiConsole.WriteLine();
+}
+
+/// <summary>
+/// 同一次中斷內監看清單異動時的簡短提示（新增/移除監看，不是新的中斷，不重印整個區塊）。
+/// 目前 --dap 的具名管道通道沒有切換框架的指令，所以這裡只需要比對監看清單。
+/// </summary>
+static void PrintWatchDelta(DebugHaltedState previous, DebugHaltedState current)
+{
+    var previousExpressions = previous.Watches.Select(w => w.Expression).ToHashSet();
+    var currentExpressions = current.Watches.Select(w => w.Expression).ToHashSet();
+
+    foreach (WatchResult watch in current.Watches)
+    {
+        if (previousExpressions.Contains(watch.Expression))
+        {
+            continue;
+        }
+
+        string value = watch.TimedOut ? "逾時" : watch.Error ?? watch.Value ?? "null";
+        AnsiConsole.MarkupLine($"    [dim]+ 監看[/] {Markup.Escape(watch.Expression)} = {Markup.Escape(value)}");
+    }
+
+    foreach (string expression in previousExpressions.Except(currentExpressions))
+    {
+        AnsiConsole.MarkupLine($"    [dim]- 監看[/] {Markup.Escape(expression)}");
+    }
+}
+
+/// <summary>
 /// 非互動的輸出串流：接上 DBWIN 監聽器，把應用程式 OutputDebugString 訊息逐行印到主控台，
 /// 可直接用 &gt; file 導向保存。Ctrl+C 乾淨結束；監聽建立失敗（多半是被 DebugView 等其他監聽者占用）
 /// 印出原因並回傳非零結束碼。
@@ -496,7 +761,7 @@ static void PrintHelp()
         clrdiag {version} — 終端機版 .NET 記憶體 / 執行緒診斷主控台（不需要 Visual Studio）
 
         用法
-          clrdiag                       啟動互動式儀表板（建置 / 伺服器 / 記憶體 / 堆疊 / 執行緒）
+          clrdiag                       啟動互動式儀表板（建置 / 伺服器 / 記憶體 / 堆疊 / 執行緒 / 偵錯）
           clrdiag --list                列出可監看的受控行程
           clrdiag --pid 12345           直接監看指定行程
           clrdiag --port 8080           覆寫設定檔的連接埠
@@ -506,7 +771,9 @@ static void PrintHelp()
           clrdiag --export              取一次快照並輸出 CSV
           clrdiag --build [Release]     依設定建置一次（不進互動介面）
           clrdiag --output [--pid N]    串流應用程式的 Debug/Trace 輸出（OutputDebugString），Ctrl+C 結束
-          clrdiag --render              把八個面板渲染成純文字（可貼進問題回報）
+          clrdiag --dap                 非互動除錯：印出每次中斷的堆疊/區域變數/監看，Ctrl+C 結束
+          clrdiag --send '<json>'       對本機（或 --pid 對應）專案的除錯指令管道送一個指令並印出回覆
+          clrdiag --render              把九個面板渲染成純文字（可貼進問題回報）
           clrdiag --init                在專案根目錄產生 clrdiag.json 範本
           clrdiag --config <path>       指定設定檔
           clrdiag --root <path>         指定專案根目錄
@@ -517,13 +784,20 @@ static void PrintHelp()
           沒有設定檔時會自動偵測 .sln / .csproj，仍可監看、快照、分析既有行程。
 
         互動按鍵
-          0/1/2      選 build / serve / process 面板
-          3/4/5/6/7  選 記憶體 / 堆疊 / 執行緒 / 記錄 / 輸出
-                     同一個數字再按一次＝放大該面板（Esc 或同號鍵還原）；上排數字與數字鍵盤都可用
-          b 建置    c 切換設定    s 啟動    x 停止    r 重建並重啟
+          0/1/2        選 build / serve / process 面板
+          3/4/5/6/7/8  選 記憶體 / 堆疊 / 執行緒 / 記錄 / 輸出 / 偵錯
+                       同一個數字再按一次＝放大該面板（Esc 或同號鍵還原）；上排數字與數字鍵盤都可用
+          b 建置    c 切換設定    s 啟動    Shift+S 準備下次以除錯器啟動    x 停止    r 重建並重啟
           n 取快照  T 只更新執行緒堆疊    d 設比較基準（Shift+D 清除）    a 自動快照
           o 切換排序  / 過濾型別  f 找出根參考鏈  e 匯出 CSV  p 切換行程
-          g 輸出檢視的 PID 範圍（只看附加 PID / 全部行程）  q 離開
+          g 輸出檢視的 PID 範圍（只看附加 PID / 全部行程）  w 新增/移除監看運算式
+          F5 續行  F10 下一步  F11 進入函式  Shift+F11 跳出函式  F6 暫停
+          q 離開
+
+        除錯（.NET 8+，需要 netcoredbg）
+          在 Neovim 或 VS Code 設定中斷點，中斷後的呼叫堆疊、區域變數、監看結果都顯示在本工具
+          的偵錯分頁（按 8）。ClrDiag 是唯一的 DAP 客戶端，編輯器只透過具名管道送意圖過來，
+          細節見 README「除錯」一節。
 
         """
     );

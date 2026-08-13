@@ -35,6 +35,12 @@ public sealed partial class DiagApp
             return;
         }
 
+        if (debugArmed)
+        {
+            StartServerUnderDebugger();
+            return;
+        }
+
         busy = "啟動伺服器";
         status = $"啟動開發伺服器（連接埠 {server.Port}）…";
         backgroundWork = Task.Run(async () =>
@@ -52,11 +58,94 @@ public sealed partial class DiagApp
         });
     }
 
+    /// <summary>Shift+S 準備／取消「下次啟動走除錯器」；s 與 r 讀這個旗標決定路徑。</summary>
+    private void ToggleDebugArm()
+    {
+        debugArmed = !debugArmed;
+        status = debugArmed
+            ? "已準備：下次按 s 或 r 會在除錯器下啟動（再按 Shift+S 取消）"
+            : "已取消除錯器啟動準備";
+    }
+
+    /// <summary>
+    /// 啟動模式的除錯：serveCommand/serveArguments/port 原樣重用，不走 ServerService.StartAsync
+    /// 的一般啟動路徑，這樣才能命中啟動路徑上的中斷點（attach 搆不到）。實際走哪條路由
+    /// LaunchServerUnderDebuggerAsync 依 serveCommand 是不是 wrapper 決定：
+    /// 直接對 serveCommand 送 DAP launch，或啟動 wrapper 再 attach 到它的子行程。
+    /// 目標行程的 PID 由 DapSessionService 的 process 事件回填（見 OnDebuggeeProcessStarted）
+    /// 或（wrapper 路徑）ServerService.AdoptDebuggee 直接設定，不像一般啟動要輪詢等新行程出現。
+    /// </summary>
+    private void StartServerUnderDebugger()
+    {
+        if (!config.CanServe)
+        {
+            status = $"設定檔未指定 {DiagConfig.FileName} 的 serveCommand，無法在除錯器下啟動";
+            return;
+        }
+
+        busy = "啟動伺服器（除錯模式）";
+        status = "在除錯器下啟動開發伺服器…";
+        debugArmed = false;
+
+        backgroundWork = Task.Run(async () =>
+        {
+            (_, string message) = await LaunchServerUnderDebuggerAsync().ConfigureAwait(false);
+            status = message;
+        });
+    }
+
+    /// <summary>
+    /// 實際執行「在除錯器下啟動伺服器」，StartServerUnderDebugger 與 RestartWithBuild 共用。
+    /// serveCommand 若是 `dotnet run` 這類 wrapper（DiagConfig.IsWrapperServeCommand），直接對
+    /// wrapper 送 DAP launch 只會附加到 wrapper 本身，中斷點永遠不會命中——改走
+    /// ServerService.StartUnderDebuggerAsync（啟動 wrapper → 找子行程 → attach，見該方法說明）。
+    /// 不是 wrapper（例如已經指向建置好的組件本身）維持原本直接 DAP launch 的路徑。
+    /// </summary>
+    private async Task<(bool Ok, string Message)> LaunchServerUnderDebuggerAsync()
+    {
+        if (config.IsWrapperServeCommand)
+        {
+            int? pid = await server
+                .StartUnderDebuggerAsync(dap, config.DapAdapterPath, cts.Token)
+                .ConfigureAwait(false);
+            return pid is not null
+                ? (true, $"已在除錯器下啟動伺服器 PID {pid}（等待中斷點，按 8 看偵錯分頁）")
+                : (false, "除錯啟動失敗（按 6 看記錄）");
+        }
+
+        string program = config.Expand(config.ServeCommand!, port: server.Port);
+        string[] args = (config.ServeArguments ?? Array.Empty<string>())
+            .Select(a => config.Expand(a, port: server.Port))
+            .ToArray();
+
+        bool ok = await dap.LaunchAsync(program, args, config.Root, config.DapAdapterPath, cts.Token)
+            .ConfigureAwait(false);
+        return ok
+            ? (true, "已在除錯器下啟動伺服器（等待中斷點，按 8 看偵錯分頁）")
+            : (false, $"除錯啟動失敗: {dap.LastError}（按 6 看記錄）");
+    }
+
     private void StopServer()
     {
         if (backgroundWork is not null)
         {
             status = "已有背景工作進行中";
+            return;
+        }
+
+        // 由除錯器啟動的伺服器要走 DAP terminate，直接 taskkill 會留下沒人善後的 netcoredbg
+        if (dap.IsConnected && dap.IsLaunchMode)
+        {
+            busy = "停止伺服器（除錯模式）";
+            backgroundWork = Task.Run(async () =>
+            {
+                await dap.DisconnectAsync(cts.Token).ConfigureAwait(false);
+                // wrapper 啟動（dotnet run 類）才會留下 wrapper 行程；直接 launch 沒有 wrapper
+                // 可清，這裡呼叫也安全。子行程已由上面的 disconnect 連帶終止。
+                server.CleanupDebugWrapper();
+                monitor.Attach(null);
+                status = "已透過除錯器停止伺服器";
+            });
             return;
         }
 
@@ -69,7 +158,11 @@ public sealed partial class DiagApp
         });
     }
 
-    /// <summary>完整的日常開發迴圈：停止 → 建置 → 啟動，並保留監看歷史。</summary>
+    /// <summary>
+    /// 完整的日常開發迴圈：停止 → 建置 → 啟動，並保留監看歷史。
+    /// debugArmed 時，啟動那一步跟 s 鍵一樣改走 DAP launch（見 StartServerUnderDebugger）；
+    /// 已經在除錯器下執行時，停止那一步改走 DAP disconnect，不直接 taskkill。
+    /// </summary>
     private void RestartWithBuild()
     {
         if (backgroundWork is not null)
@@ -78,10 +171,20 @@ public sealed partial class DiagApp
             return;
         }
 
+        bool launchUnderDebugger = debugArmed;
+        debugArmed = false;
+
         busy = "重建並重啟";
         backgroundWork = Task.Run(async () =>
         {
-            if (server.ServerPid is not null)
+            if (dap.IsConnected && dap.IsLaunchMode)
+            {
+                status = "停止除錯階段…";
+                await dap.DisconnectAsync(cts.Token).ConfigureAwait(false);
+                server.CleanupDebugWrapper(); // wrapper 啟動才有東西可清，直接 launch 呼叫也安全
+                monitor.Attach(null);
+            }
+            else if (server.ServerPid is not null)
             {
                 status = "停止伺服器…";
                 await server.StopAsync(cts.Token).ConfigureAwait(false);
@@ -95,6 +198,23 @@ public sealed partial class DiagApp
             if (!result.Success)
             {
                 status = $"建置失敗，未重啟伺服器（{result.Errors.Count} 個錯誤）";
+                return;
+            }
+
+            if (launchUnderDebugger)
+            {
+                if (!config.CanServe)
+                {
+                    status = $"建置成功，但未設定 serveCommand 無法在除錯器下啟動";
+                    return;
+                }
+
+                status = "在除錯器下啟動伺服器…";
+                (bool debugOk, string debugMessage) = await LaunchServerUnderDebuggerAsync()
+                    .ConfigureAwait(false);
+                status = debugOk
+                    ? $"重建並在除錯器下重啟完成（建置 {Format.Duration(result.Duration)}）"
+                    : $"建置成功但{debugMessage}";
                 return;
             }
 

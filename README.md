@@ -43,7 +43,9 @@ clrdiag --roots "MyApp.Cache"    # 這個型別被哪個 GC 根握住
 clrdiag --export                 # 快照輸出成 CSV
 clrdiag --build Release          # 依設定建置一次
 clrdiag --output [--pid N]       # 串流應用程式的 Debug/Trace 輸出，Ctrl+C 結束
-clrdiag --render                 # 把八個面板渲染成純文字
+clrdiag --dap                    # 非互動除錯：印出每次中斷的堆疊/區域變數/監看，Ctrl+C 結束
+clrdiag --send '<json>'          # 對本機專案的除錯指令管道送一個指令並印出回覆
+clrdiag --render                 # 把九個面板渲染成純文字
 ```
 
 ## 設定檔 clrdiag.json
@@ -63,6 +65,10 @@ clrdiag --render                 # 把八個面板渲染成純文字
 | `processNames`    | 要尋找的行程名稱。留空 = 掃描所有載入 CLR 的行程                          |
 | `appNamespaces`   | 視為「自己程式碼」的命名空間前綴。留空 = 以「非框架」近似判斷              |
 | `reportDirectory` | CSV 輸出目錄                                                              |
+| `dapEnabled`      | 是否啟用除錯功能（spawn netcoredbg、開具名管道）。預設 `true`             |
+| `dapAdapterPath`  | netcoredbg 執行檔路徑。省略時：`PATH` → mason 預設安裝路徑                |
+| `dapBreakpoints`  | 啟動時載入的中斷點清單，格式 `"路徑:行號"`（見下方「除錯」一節）          |
+| `dapWatches`      | 啟動時載入的監看運算式清單                                                |
 
 其他常見情境：
 
@@ -78,37 +84,57 @@ clrdiag --render                 # 把八個面板渲染成純文字
 
 ## 畫面與按鍵
 
-八個面板都有編號：上排三個固定顯示 build / serve / process 狀態，中間是可切換的五個檢視。
-按數字鍵選取面板，**再按同一個數字鍵就放大**（隱藏上排、佔滿整個畫面），`Esc` 或同號鍵還原。
-主鍵盤上排數字與數字鍵盤都可以用。
+九個面板都有編號：上排三個固定顯示 build / serve / process 狀態，
+中間的主區是六個分頁，分頁列就在主區上方（作用中的分頁以 aqua 粗體加底線標示）。
+按數字鍵選取面板或切換分頁，**再按同一個數字鍵就放大**（隱藏上排、佔滿整個畫面），
+`Esc` 或同號鍵還原。主鍵盤上排數字與數字鍵盤都可以用。
 
-| 鍵  | 面板    | 內容                                                                 |
-| --- | ------- | -------------------------------------------------------------------- |
+上排面板：
+
+| 鍵  | 面板    | 內容                                                                  |
+| --- | ------- | --------------------------------------------------------------------- |
 | `0` | build   | 建置設定與最近一次結果；放大後列出**全部**錯誤（完整訊息不截斷）與警告 |
-| `1` | serve   | 伺服器狀態與健康探測；放大後是完整探測記錄表與延遲統計               |
-| `2` | process | 附加行程的記憶體／CPU；放大後是全部計數器與逐秒取樣歷史              |
-| `3` | 記憶體  | 私有／工作集／受控堆疊／Gen2／LOH／CPU 走勢，GC 次數，成長量         |
-| `4` | 堆疊    | 型別直方圖、與基準快照的差異、根參考鏈                               |
-| `5` | 執行緒  | 受控執行緒清單與呼叫堆疊（● 標記自己的程式碼）                       |
-| `6` | 記錄    | 設定解析結果、建置與伺服器輸出                                       |
-| `7` | 輸出    | 應用程式的 `Debug.WriteLine` / `Trace.WriteLine`（OutputDebugString） |
+| `1` | serve   | 伺服器狀態與健康探測；放大後是完整探測記錄表與延遲統計                |
+| `2` | process | 附加行程的記憶體／CPU；放大後是全部計數器與逐秒取樣歷史               |
 
-被選取的面板框線會變粗；放大 build / serve 面板時 `↑↓` 捲動它的內容。
+主區分頁：
 
-| 鍵        | 動作                                     |
-| --------- | ---------------------------------------- |
-| `b` / `c` | 建置 / 切換建置設定                      |
-| `s` / `x` | 啟動 / 停止伺服器（需要 `serveCommand`） |
-| `r`       | 停止 → 建置 → 啟動，並保留監看歷史       |
-| `n`       | 取受控堆疊快照                           |
-| `Shift+T` | 只更新執行緒堆疊（比完整快照快很多）     |
-| `d` / `D` | 設為比較基準 / 清除基準                  |
-| `o` / `/` | 切換排序 / 過濾型別（`Esc` 清除）        |
-| `f`       | 對選取型別搜尋 GC 根參考鏈               |
-| `e`       | 匯出 CSV                                 |
-| `a`       | 自動快照（每 5 分鐘，長時間追蹤成長用）  |
-| `p`       | 切換監看的行程                           |
-| `q`       | 離開                                     |
+| 鍵  | 分頁   | 內容                                                                 |
+| --- | ------ | -------------------------------------------------------------------- |
+| `3` | 記憶體 | 私有／工作集／受控堆疊／Gen2／LOH／CPU 走勢，GC 次數，成長量         |
+| `4` | 堆疊   | 型別直方圖、與基準快照的差異、根參考鏈                               |
+| `5` | 執行緒 | 受控執行緒清單與呼叫堆疊（● 標記自己的程式碼）                       |
+| `6` | 記錄   | 設定解析結果、建置與伺服器輸出                                       |
+| `7` | 輸出   | 應用程式的 `Debug.WriteLine` / `Trace.WriteLine`（OutputDebugString） |
+| `8` | 偵錯   | 中斷點／監看清單；中斷後改成呼叫堆疊 + 區域變數／監看結果（見下方「除錯」一節） |
+
+被選取的面板框線會變粗；放大 build / serve 面板時 `↑↓` 捲動它的內容
+（此時主區是那個面板的內容，分頁列會一併收起）。
+
+最下面是單列狀態列：左邊是目前面板的按鍵與全域按鍵，右邊永遠是最新一則狀態訊息。
+終端機太窄時按鍵提示會先讓位、狀態訊息留到最後。完整按鍵表按 `?`（會寫進 `6` 記錄分頁）。
+
+| 鍵                | 動作                                                |
+| ----------------- | --------------------------------------------------- |
+| `b` / `c`         | 建置 / 切換建置設定                                  |
+| `s` / `x`         | 啟動 / 停止伺服器（需要 `serveCommand`）             |
+| `Shift+S`         | 準備／取消「下次 `s` 或 `r` 在除錯器下啟動」（見下方「除錯」一節） |
+| `r`               | 停止 → 建置 → 啟動，並保留監看歷史                   |
+| `n`               | 取受控堆疊快照                                       |
+| `Shift+T`         | 只更新執行緒堆疊（比完整快照快很多）                 |
+| `d` / `D`         | 設為比較基準 / 清除基準                              |
+| `o` / `/`         | 切換排序 / 過濾型別（`Esc` 清除）                    |
+| `f`               | 對選取型別搜尋 GC 根參考鏈                           |
+| `e`               | 匯出 CSV                                             |
+| `a`               | 自動快照（每 5 分鐘，長時間追蹤成長用）              |
+| `p`               | 切換監看的行程                                       |
+| `w`               | 新增／移除監看運算式（已存在的會被移除，行內輸入）   |
+| `F5`              | 續行                                                  |
+| `F10`             | 下一步（step over）                                  |
+| `F11`             | 進入函式（step in）                                  |
+| `Shift+F11`       | 跳出函式（step out）                                 |
+| `F6`              | 暫停                                                  |
+| `q`               | 離開                                                  |
 
 ## 應用程式輸出（OutputDebugString）
 
@@ -130,6 +156,193 @@ Visual Studio「輸出視窗」在終端機工作流裡缺掉的那一塊：應�
 - 同時監聽本機工作階段與 `Global\` 兩組具名物件，跨工作階段（例如附加到以服務身分執行的
   w3wp）才需要後者；`just dev` 這種同一使用者工作階段的情境本機那組就夠用。
 
+## 除錯（.NET 8+，中斷點）
+
+ClrDiag 是 .NET 8+ 目標（Windows x64）的除錯前端：它自己 spawn
+[netcoredbg](https://github.com/Samsung/netcoredbg)（Samsung，MIT 授權）並直接驅動——**ClrDiag
+是唯一的 DAP（Debug Adapter Protocol）客戶端**，沒有代理、沒有第二個觀察者。
+Neovim（或任何送 `--send` 的客戶端）不是 DAP 客戶端，只透過專案範圍的具名管道送「中斷點在哪」
+「監看什麼」「續行/單步」這類意圖過去；中斷後的呼叫堆疊、區域變數、監看結果一律顯示在 ClrDiag
+自己的 `8 偵錯` 分頁。這與 `n` 鍵的堆疊快照（ClrMD + Windows PSS 行程複本）是兩條獨立路徑：
+快照不會讓目標進入除錯狀態，除錯階段也不會擋到快照——兩者可以同時使用。
+
+### 需求與設定
+
+- Windows x64，目標行程 64 位元、.NET 8 以上（與其他功能一致，`--list` 只會列出 64 位元受控行程）。
+- 需要安裝 [netcoredbg](https://github.com/Samsung/netcoredbg)。解析順序：
+  `clrdiag.json` 的 `dapAdapterPath` → `PATH` → mason 的預設安裝路徑
+  （`%LOCALAPPDATA%\nvim-data\mason\packages\netcoredbg\netcoredbg\netcoredbg.exe`）。
+  找不到會在 `6 記錄` 印出明確的錯誤，不會靜默失敗。
+- `dapEnabled: false` 可整個關閉除錯功能（不 spawn 任何東西、不開具名管道）。
+- `dapBreakpoints` / `dapWatches` 是**啟動時的初始清單**，格式見上方設定檔表格；
+  執行期用 Neovim 或 TUI（`w` 鍵）新增／移除的變更不會寫回設定檔——與 `buildConfiguration`
+  等其他欄位一致，設定檔只在啟動時讀一次。路徑的 `/` 與 `\` 都接受（會統一正規化成 `\`
+  再送給 netcoredbg 比對）；大小寫也不分。
+
+### 使用方式
+
+1. `clrdiag`（照常啟動）；`8` 切到偵錯分頁。netcoredbg 不會一開機就啟動——第一個中斷點動作
+   （從 Neovim 或 `--send` 送 `setBreakpoint`）才會 spawn 它並附加到目前監看的行程。
+2. 在 Neovim 設定中斷點（見下方設定），或直接 `clrdiag --send` 手動測試。
+3. 命中中斷點時 `8` 分頁自動顯示呼叫堆疊（`●` 標記自己的程式碼，判斷方式與 `5 執行緒`
+   分頁一致）＋選取框架的區域變數＋全部監看運算式的求值結果。`↑↓` 切換選取的框架。
+4. `F5` 續行、`F10` 下一步、`F11` 進入函式、`Shift+F11` 跳出函式、`F6` 暫停——
+   VS/VS Code 慣用的功能鍵，Neovim 那邊送同樣的指令一樣有效，兩邊看到的狀態一致。
+5. `w` 在 TUI 裡新增／移除監看運算式（已存在的運算式再輸入一次會被移除）。
+6. 未驗證的中斷點（例如原始碼路徑大小寫或正規化跟 PDB 對不起來）一律顯眼標示
+   `○ 未驗證` 加上 adapter 回報的原因，不會悄悄失效。
+
+**啟動路徑上的中斷點**（例如 `Program.cs` 最前面幾行）用 attach 搆不到，因為附加時程式早就
+跑過去了：`Shift+S` 準備「下次 `s` 或 `r` 在除錯器下啟動」，之後按 `s`（或 `r` 重建並重啟）
+會改用 DAP `launch` 啟動 `serveCommand`/`serveArguments`（原樣重用，`{port}` 等佔位符照舊），
+serve 面板顯示 `RUNNING (debug)`；`x` 這時會走 DAP `terminate` 而不是直接砍行程。
+偵錯目標的行程 id 學到後會自動接管 `ProcessMonitor`（狀態列與 `6 記錄` 會宣告切換，不會自動換回，
+要換行程用 `p`）。
+
+> ✅ **`dotnet run` 這類 wrapper 也支援**：如果 `serveCommand` 是 `dotnet run ...`
+> （本文件範例的預設寫法），netcoredbg 的 `launch` 直接對它送命令只會附加到 `dotnet run`
+> 這個外層行程——它另外開的子行程才是真正的 app，中斷點原本不會命中。`Shift+S` 現在會偵測
+> 出這種 wrapper 寫法（`dotnet` + 第一個參數是 `run`），改走「啟動 wrapper（不受除錯器控制）
+> → 用 Win32 Toolhelp32 直接查 wrapper 的直接子行程（比掃描全部行程快得多，排除掉
+> `conhost.exe` 這類無關的主控台輔助行程）→ 一偵測到子行程就立刻對它送 DAP `attach`」。
+> 子行程出現到除錯器接手的間隔壓在毫秒級，`Main`／DI wiring 這類啟動路徑上的中斷點可以
+> 穩定命中；serve 面板一樣顯示 `RUNNING (debug)`，`x` 一樣走 DAP terminate。
+> 找不到子行程、wrapper 提前結束、或附加本身失敗，一律在 `6 記錄` 印出明確原因並清掉
+> wrapper 行程，不會悄悄退化成「附加到 wrapper、中斷點全部不會命中」。
+>
+> 殘餘限制：偵測子行程之後仍有一段（通常個位數毫秒）追上去的時間，不是行程建立時的強制
+> 暫停——極早、只有一兩行就執行完、中間沒有其他工作的啟動路徑仍可能撲空；只認得
+> `serveCommand` 是 `dotnet` 且第一個參數是 `run` 的寫法，其他種類的 wrapper（例如批次檔、
+> PowerShell 腳本）仍會直接附加到 wrapper 本身。真的撲空或用的是其他 wrapper，
+> 一樣可以照原本的作法把 `serveCommand`/`serveArguments` 改指向建置好的組件本身，
+> 例如 `"dotnet", ["bin/Debug/net8.0/MyApp.dll"]`，或直接指向 apphost（`MyApp.exe`）——
+> 這樣完全沒有子行程可找，netcoredbg 直接 launch 目標本身。
+> 一般 `s`/`r`（不經除錯器）不受影響。
+
+**堆疊面板設定中斷點**（從 `4 堆疊` 選取型別直接下中斷點）目前沒有做——規劃書把它列為可選的
+延伸目標，核心切面只做「編輯器設中斷點、ClrDiag 顯示結果」這件事。
+
+### Neovim 設定
+
+`nvim/lua/clrdiag/` 是一支不依賴任何外部套件的最小 Lua 客戶端（唯一需求是 `clrdiag` 在
+`PATH` 上——管道名稱由 `clrdiag --pipe-name` 問出來，特意不在 Lua 端另外實作一份雜湊邏輯）。
+用 lazy.nvim 之類的套件管理器直接指向這個資料夾：
+
+```lua
+{
+  dir = "C:/path/to/GSS_KPIM2104/tools/ClrDiag/nvim",
+  name = "clrdiag",
+  config = function()
+    require("clrdiag").setup({
+      -- root = "C:/path/to/project",  -- 省略時讓 ClrDiag 自行判斷（往上找 clrdiag.json / .git）
+      -- keymaps = false,             -- 傳 false 完全自己接鍵；預設鍵見下
+      -- notify_on_halt = true,       -- 中斷時是否跳通知
+      -- jump_on_halt = false,        -- 中斷時是否自動把游標跳過去；預設關閉，全程只看 ClrDiag 的 TUI
+      -- icons = {                    -- gutter 圖示，可個別覆寫
+      --   breakpoint = "●",            -- 已綁定（verified）的中斷點
+      --   breakpoint_unverified = "○", -- 尚未綁定的中斷點（刻意跟已綁定的圖示不同）
+      --   stop = "▶",                  -- 目前中斷所在行
+      --   statusline_pause = "⏸",      -- state():statusline() 用的前綴圖示
+      -- },
+      -- highlights = {               -- 對應的 highlight group 名稱，可個別覆寫成自己的顏色
+      --   breakpoint = "ClrDiagBreakpointSign",
+      --   breakpoint_unverified = "ClrDiagBreakpointUnverifiedSign",
+      --   stop = "ClrDiagStopSign",
+      --   stop_line = "ClrDiagStopLine",
+      -- },
+    })
+  end,
+}
+```
+
+預設鍵(`opts.keymaps` 可覆寫個別項目，或整組傳 `false`)：
+
+| 鍵                | 動作                             |
+| ----------------- | -------------------------------- |
+| `<leader>db`       | 切換游標所在行的中斷點           |
+| `<leader>dw`       | 監看游標下的字（已存在會移除）   |
+| `<F5>`             | 續行                             |
+| `<F10>`            | 下一步                           |
+| `<F11>`            | 進入函式                         |
+| `<S-F11>`          | 跳出函式                         |
+
+也提供對應的使用者指令（`:ClrdiagBreakpoint`、`:ClrdiagWatch [expr]`、`:ClrdiagWatchWord`、
+`:ClrdiagRemoveWatch [expr]`、`:ClrdiagContinue`、`:ClrdiagStepOver`、`:ClrdiagStepIn`、
+`:ClrdiagStepOut`、`:ClrdiagPause`、`:ClrdiagConnect`、`:ClrdiagDisconnect`）與
+`require("clrdiag").state()`（最近一次收到的階段狀態，可接 statusline）。
+
+**gutter 上的中斷點與中斷指標**：ClrDiag 每次回覆／推播都會附上完整的中斷點清單與目前的
+階段狀態，Neovim 端據此在已開啟的緩衝區 gutter 畫出對應的 sign（不維護本地快取，全部
+以 ClrDiag 那份為準，包含移除）——已綁定的中斷點是實心圓 `●`，尚未綁定（`verified: false`）
+的是空心圓 `○`，一眼就能看出差別；目前中斷的那一行則會多一個 `▶` 加整行底色，程式離開
+那一行（續行、單步、結束）就會立刻清掉，不會留著一個過期的指標。這些 sign 用專屬的
+sign group（`ClrDiagBreakpoints`、`ClrDiagStop`），不會跟 nvim-dap 或其他外掛的 sign
+互相干擾。
+
+中斷發生時（真正「新中斷」的那一刻，同一個中斷狀態重複推播不會再吵一次）會跳一則通知，
+內容是原因跟精簡的 `檔名:行號`；`opts.notify_on_halt = false` 可以關掉。預設不會自動跳
+游標過去——如果想要中斷時直接跳到該行，設定 `opts.jump_on_halt = true`；那個檔案已經開在
+某個緩衝區就直接重用（有視窗就切過去，沒視窗就顯示在目前視窗，不會另外分割或開重複的
+緩衝區），還沒開的話會自動載入並跳過去——單步跨進另一個檔案本來就是最常見的情境。只有
+檔案在磁碟上真的不存在或讀取失敗，通知裡才會說明「檔案無法開啟」而不是悄悄什麼都不做。
+
+想接進 statusline 的話用 `require("clrdiag").statusline()`：中斷時回傳類似
+`⏸ Program.cs:32` 的字串，沒中斷則回傳空字串。
+
+**VS Code** 的專屬擴充套件是規劃中的後續階段；在那之前綁一個鍵跑一個 task 呼叫
+`clrdiag --send '{"cmd":"setBreakpoint","path":"${file}","line":${lineNumber}}'` 就能設中斷點，
+畫面一樣在 ClrDiag 裡看。
+
+### 具名管道協定（文件化的契約）
+
+管道名稱依專案根目錄推導：`\\.\pipe\clrdiag-<根目錄小寫路徑的 SHA-256 前 12 hex 碼>`，
+同一個專案每次啟動都拿到同一個名字，也讓管道名稱兼作「這是哪個執行個體」的辨識——
+沒有連接埠、沒有網路曝露面，這是選具名管道而非 TCP loopback 的理由。
+不想自己算雜湊就用 `clrdiag --pipe-name`（`--root` 可指定專案根目錄，省略時規則與其他指令一致）。
+
+協定是換行分隔的 JSON，雙向：客戶端送一個指令物件，ClrDiag 立刻回一則目前的階段狀態；
+階段狀態改變（中斷／恢復／結束）時，即使沒有新指令送進來，也會不待請求主動推播給所有已連線
+的客戶端——一連上就會先收到一次目前狀態，不是任何指令的回覆。
+
+指令（`cmd` 欄位）：
+
+| `cmd`             | 其他欄位             | 說明                         |
+| ----------------- | -------------------- | ---------------------------- |
+| `setBreakpoint`    | `path`, `line`        | 新增中斷點（冪等）           |
+| `clearBreakpoint`  | `path`, `line`        | 移除中斷點                   |
+| `addWatch`         | `expression`          | 新增監看運算式（冪等）       |
+| `removeWatch`      | `expression`          | 移除監看運算式               |
+| `continue`         | —                     | 續行                         |
+| `stepOver`         | —                     | 下一步                       |
+| `stepIn`           | —                     | 進入函式                     |
+| `stepOut`          | —                     | 跳出函式                     |
+| `pause`            | —                     | 暫停                         |
+
+`path` 逐字比對（不分大小寫，Windows 路徑），沒有正規化——這正是為什麼未驗證的中斷點
+一定要顯眼標示：來源路徑跟 PDB 對不起來是中斷點悄悄失效最常見的原因。
+
+狀態回覆／推播的形狀（`sessionState` 是 `Idle`/`Connecting`/`Running`/`Halted`/`Terminated`/`Failed`
+其中之一；`threadId`/`stopReason`/`location`/`watchResults` 只在 `Halted` 且已完成擷取時出現）：
+
+```jsonc
+{
+  "type": "state",
+  "sessionState": "Halted",
+  "pid": 12345,
+  "launchMode": false,
+  "threadId": 1,
+  "stopReason": "breakpoint",
+  "location": { "path": "C:\\App\\Program.cs", "line": 42 },
+  "watchResults": [
+    { "expression": "counter", "value": "7", "timedOut": false, "error": null }
+  ],
+  "breakpoints": [
+    { "path": "C:\\App\\Program.cs", "line": 42, "verified": true, "message": null }
+  ],
+  "watches": [ "counter" ]
+}
+```
+
 ## 找記憶體洩漏的流程
 
 1. `clrdiag`，讓它掛上執行中的行程（或按 `s` 啟動）。
@@ -142,10 +355,15 @@ Visual Studio「輸出視窗」在終端機工作流裡缺掉的那一塊：應�
 
 ## 實作重點與已知限制
 
-- **不是除錯器，沒有中斷點。** 走 ClrMD + Windows PSS 行程快照（`CreateSnapshotAndAttach`），
-  目標行程不會進入除錯狀態，工具異常結束也不會把目標一起帶走。
-  需要中斷點／逐步執行時用 VS Code 的 `"type": "clr"` attach（64 位元 + portable PDB）。
-- **必須是 64 位元目標行程**：ClrMD 要載入同位元數的 DAC，32 位元行程不會出現在 `--list`。
+- **堆疊快照（`n` 鍵）不是除錯器，沒有中斷點。** 走 ClrMD + Windows PSS 行程快照
+  （`CreateSnapshotAndAttach`），目標行程不會進入除錯狀態，工具異常結束也不會把目標一起帶走。
+  需要中斷點／逐步執行時用 `8 偵錯` 分頁（見上方「除錯」一節，.NET 8+ 專用）——
+  兩條路徑互不影響，可以同時用。
+- **必須是 64 位元目標行程**：ClrMD 要載入同位元數的 DAC，32 位元行程不會出現在 `--list`；
+  除錯功能（netcoredbg）同樣要求 64 位元、.NET 8+ 的受控行程。
+- **除錯階段中 `7 輸出` 可能安靜下來**：附加了偵錯器之後，目標行程的 `OutputDebugString`
+  會被作業系統直接送去給偵錯器，而不是 DBWIN 緩衝區，`7 輸出` 這時可能收不到新訊息。
+  已知限制，沒有解法——這是 Windows 偵錯 API 的行為，不是攔截層的錯。
 - **快照成本**實測約 2.2 µs／物件：10 萬物件 0.6 秒、236 萬物件 5 秒、580 萬物件 6–8 秒。
   期間 UI 不卡（背景執行緒），但目標行程會被 PSS 複製一次。
 - **`Gen0 預算`** 來自 `.NET CLR Memory\Gen 0 heap size` 計數器，它回報的是 gen0 配置預算

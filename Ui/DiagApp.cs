@@ -1,4 +1,5 @@
 using ClrDiag.Core;
+using ClrDiag.Core.Dap;
 using Spectre.Console;
 using Spectre.Console.Rendering;
 
@@ -11,6 +12,7 @@ public enum DiagView
     Threads,
     Log,
     Output,
+    Debug,
 }
 
 public enum HeapSort
@@ -22,7 +24,8 @@ public enum HeapSort
 }
 
 /// <summary>
-/// 主控台儀表板：上方是建置 / 伺服器 / 行程三個狀態面板，中間是可切換的檢視，下方是按鍵與狀態列。
+/// 主控台儀表板：上方是建置 / 伺服器 / 行程三個狀態面板，中間是可切換的分頁檢視，
+/// 最下面是單列的按鍵與狀態列。
 /// 所有耗時工作（建置、快照、根參考搜尋）都在背景執行，UI 迴圈只負責繪製與收鍵。
 /// </summary>
 public sealed partial class DiagApp : IDisposable
@@ -36,6 +39,8 @@ public sealed partial class DiagApp : IDisposable
     private readonly ServerService server;
     private readonly DebugOutputListener debugOutput = new();
     private readonly DebugOutputBuffer outputBuffer = new();
+    private readonly DapSessionService dap;
+    private DebugCommandServer? dapPipe;
     private readonly CancellationTokenSource cts = new();
 
     // 快照在背景執行緒完成、UI 執行緒讀取，因此採用「複製後整批換掉」的方式：
@@ -63,9 +68,13 @@ public sealed partial class DiagApp : IDisposable
     private int threadCursor;
     private int logScroll;
     private int outputScroll;
+    private int debugFrameCursor;
     private bool outputAllPids;
     private string buildConfiguration = "Debug";
     private bool autoSnapshot;
+    private bool debugArmed;
+    private bool watchInputMode;
+    private string watchInput = string.Empty;
     private DateTime lastAutoSnapshot = DateTime.MinValue;
     private string status = "就緒";
     private string? busy;
@@ -83,6 +92,27 @@ public sealed partial class DiagApp : IDisposable
         appCode = new AppCodeMatcher(config.AppNamespaces);
         buildConfiguration = config.Configurations.FirstOrDefault() ?? "Debug";
         debugOutput.LineReceived += line => outputBuffer.Add(line);
+
+        dap = new DapSessionService(log);
+        dap.SeedFromConfig(config.ParsedDapBreakpoints, config.DapWatches);
+        dap.DefaultAdapterPath = config.DapAdapterPath;
+        // 除錯階段閒置時，送出第一個中斷點會自動附加到目前監看的行程（懶惰啟動，見規劃書
+        // 「Spawn timing」假設）；沒有監看目標就先讓中斷點留在清單裡，不強行啟動。
+        dap.AutoAttachPidProvider = () => monitor.TargetPid;
+        dap.ProcessStarted += OnDebuggeeProcessStarted;
+    }
+
+    /// <summary>
+    /// 除錯目標的行程 id 出現時（launch 模式的 process 事件，或 attach 目標本身），自動把
+    /// ProcessMonitor 切到這個 PID——鎖定決策「Auto-switch to debuggee」：不做還原，
+    /// 使用者要換回別的行程就按 p。
+    /// </summary>
+    private void OnDebuggeeProcessStarted(int pid)
+    {
+        monitor.Attach(pid);
+        server.AdoptDebuggee(pid);
+        status = $"除錯目標 PID {pid}（已自動切換監看）";
+        log.Add("dap", LogKind.Info, $"自動切換監看至除錯目標 PID {pid}");
     }
 
     /// <summary>啟動 DBWIN 監聽並把「無法攔截」的原因寫進訊息記錄；其餘功能不受影響。</summary>
@@ -99,10 +129,27 @@ public sealed partial class DiagApp : IDisposable
         }
     }
 
+    /// <summary>
+    /// 具名管道指令通道只在互動模式開；--render/--dap 等批次模式不需要常駐通道。
+    /// 設定 dapEnabled:false 可完全關閉除錯功能（不開管道，dap 欄位仍存在但永遠是 Idle）。
+    /// </summary>
+    private void StartDebugSubsystem()
+    {
+        if (!config.DapEnabled)
+        {
+            log.Add("dap", LogKind.Info, "除錯功能已停用（dapEnabled:false）");
+            return;
+        }
+
+        dapPipe = new DebugCommandServer(dap, log, DebugCommandServer.PipeNameFor(config.Root));
+        dapPipe.Start();
+    }
+
     public void Run(int? attachPid)
     {
         monitor.Start();
         StartDebugOutputListener();
+        StartDebugSubsystem();
 
         if (attachPid is not null)
         {
@@ -196,7 +243,7 @@ public sealed partial class DiagApp : IDisposable
                 .Size(8)
                 .SplitColumns(new Layout("build"), new Layout("serve"), new Layout("process")),
             new Layout("body"),
-            new Layout("footer").Size(5)
+            new Layout("footer").Size(3)
         );
 
     /// <summary>每次繪製前的狀態維護：偵測伺服器存活、健康探測、自動快照。</summary>
@@ -257,10 +304,18 @@ public sealed partial class DiagApp : IDisposable
         // 上排隱藏後 BodyHeight() 變大，內容自動填滿。
         layout["body"]
             .Update(
-                zoomed && selectedPane < FirstViewPane ? RenderZoom(selectedPane) : RenderBodyView()
+                ShowViewTabs
+                    ? new Rows(RenderViewTabs(), RenderBodyView())
+                    : RenderZoom(selectedPane)
             );
         layout["footer"].Update(RenderFooter());
     }
+
+    /// <summary>
+    /// 分頁列只在主區顯示檢視時出現。放大上排面板（build / serve / process）時主區是那個面板的
+    /// 內容，掛一排檢視分頁在上面會指向看不到的東西，所以連同它佔的那一列一起讓出來。
+    /// </summary>
+    private bool ShowViewTabs => !(zoomed && selectedPane < FirstViewPane);
 
     private IRenderable RenderBodyView() =>
         view switch
@@ -269,6 +324,7 @@ public sealed partial class DiagApp : IDisposable
             DiagView.Heap => RenderHeapView(),
             DiagView.Threads => RenderThreadsView(),
             DiagView.Output => RenderOutputView(),
+            DiagView.Debug => RenderDebugView(),
             _ => RenderLogView(),
         };
 
@@ -285,12 +341,19 @@ public sealed partial class DiagApp : IDisposable
             windowHeight = 40;
         }
 
-        // 扣掉上排（放大時為 0）、footer 五列、body 面板自己的上下框線
-        return Math.Max(6, windowHeight - (zoomed ? 0 : 8) - 5 - 2);
+        // 扣掉上排（放大時為 0）、footer 三列（一列內容加上下框線）、
+        // 分頁列一列（放大上排面板時沒有）、body 面板自己的上下框線
+        return Math.Max(6, windowHeight - (zoomed ? 0 : 8) - 3 - (ShowViewTabs ? 1 : 0) - 2);
     }
 
     private void HandleKey(ConsoleKeyInfo key)
     {
+        if (watchInputMode)
+        {
+            HandleWatchInputKey(key);
+            return;
+        }
+
         if (filterMode)
         {
             HandleFilterKey(key);
@@ -338,6 +401,28 @@ public sealed partial class DiagApp : IDisposable
             case ConsoleKey.End:
                 MoveCursor(int.MaxValue / 2);
                 return;
+            // 執行控制走功能鍵（VS/VS Code 慣用手感），與字元按鍵表分開處理：
+            // Console.ReadKey 回報這些鍵時 KeyChar 通常是 '\0'，混進字元表徒增混淆。
+            case ConsoleKey.F5:
+                _ = dap.ContinueAsync(cts.Token);
+                status = "續行";
+                return;
+            case ConsoleKey.F10:
+                _ = dap.StepOverAsync(cts.Token);
+                status = "下一步";
+                return;
+            case ConsoleKey.F11 when key.Modifiers.HasFlag(ConsoleModifiers.Shift):
+                _ = dap.StepOutAsync(cts.Token);
+                status = "跳出函式";
+                return;
+            case ConsoleKey.F11:
+                _ = dap.StepInAsync(cts.Token);
+                status = "進入函式";
+                return;
+            case ConsoleKey.F6:
+                _ = dap.PauseAsync(cts.Token);
+                status = "暫停於下一個可中斷點";
+                return;
         }
 
         switch (char.ToLowerInvariant(key.KeyChar))
@@ -371,10 +456,22 @@ public sealed partial class DiagApp : IDisposable
                 status = $"建置設定切換為 {buildConfiguration}";
                 break;
             case 's':
-                StartServer();
+                if (key.Modifiers.HasFlag(ConsoleModifiers.Shift))
+                {
+                    ToggleDebugArm();
+                }
+                else
+                {
+                    StartServer();
+                }
+
                 break;
             case 'x':
                 StopServer();
+                break;
+            case 'w':
+                watchInputMode = true;
+                status = "輸入監看運算式，Enter 新增（已存在則移除）· Esc 取消";
                 break;
             case 'r':
                 RestartWithBuild();
@@ -434,7 +531,7 @@ public sealed partial class DiagApp : IDisposable
                 log.Add(
                     "diag",
                     LogKind.Info,
-                    "按鍵: 0/1/2 選 build/serve/process 面板 · 3/4/5/6/7 選記憶體/堆疊/執行緒/記錄/輸出 · 同號鍵再按一次放大（Esc 還原） · b 建置 · c 設定 · s 啟動 · x 停止 · r 重建並重啟 · n 快照 · T 只更新執行緒 · d 設基準(D 清除) · o 排序 · / 過濾 · f 找根參考 · e 匯出 · a 自動快照 · p 換行程 · g 輸出檢視的 PID 範圍 · q 離開"
+                    "按鍵: 0/1/2 選 build/serve/process 面板 · 3/4/5/6/7/8 切換主區分頁（記憶體/堆疊/執行緒/記錄/輸出/偵錯，分頁列在主區上方） · 同號鍵再按一次放大（Esc 還原） · b 建置 · c 設定 · s 啟動 · Shift+S 準備下次以除錯器啟動 · x 停止 · r 重建並重啟 · n 快照 · T 只更新執行緒 · d 設基準(D 清除) · o 排序 · / 過濾 · f 找根參考 · e 匯出 · a 自動快照 · p 換行程 · g 輸出檢視的 PID 範圍 · w 新增/移除監看運算式 · F5 續行 · F10 下一步 · F11 進入 · Shift+F11 跳出 · F6 暫停 · q 離開"
                 );
                 break;
         }
@@ -468,9 +565,56 @@ public sealed partial class DiagApp : IDisposable
         }
     }
 
+    /// <summary>新增／移除監看運算式的行內輸入，與 HandleFilterKey 同一種模式（Enter 套用、Esc 取消）。</summary>
+    private void HandleWatchInputKey(ConsoleKeyInfo key)
+    {
+        switch (key.Key)
+        {
+            case ConsoleKey.Escape:
+                watchInput = string.Empty;
+                watchInputMode = false;
+                status = "已取消";
+                return;
+            case ConsoleKey.Enter:
+                watchInputMode = false;
+                string expression = watchInput.Trim();
+                watchInput = string.Empty;
+                if (expression.Length == 0)
+                {
+                    return;
+                }
+
+                // 已存在就移除，不存在就新增——同一個按鍵做雙向切換，不必另外配一顆刪除鍵
+                if (dap.Watches.Any(w => w.Expression == expression))
+                {
+                    dap.RemoveWatch(expression);
+                    status = $"已移除監看: {expression}";
+                }
+                else
+                {
+                    dap.AddWatch(expression);
+                    status = $"已新增監看: {expression}";
+                }
+
+                return;
+            case ConsoleKey.Backspace:
+                if (watchInput.Length > 0)
+                {
+                    watchInput = watchInput[..^1];
+                }
+
+                return;
+        }
+
+        if (!char.IsControl(key.KeyChar))
+        {
+            watchInput += key.KeyChar;
+        }
+    }
+
     /// <summary>
-    /// 面板編號的按鍵解析。主鍵盤上排（D0–D7）與數字鍵盤（NumPad0–NumPad7）都接受；
-    /// 兩者都沒對上時再看字元，涵蓋回報方式不一樣的終端機。只認 0–7，其餘交給後面的按鍵處理。
+    /// 面板編號的按鍵解析。主鍵盤上排（D0–D8）與數字鍵盤（NumPad0–NumPad8）都接受；
+    /// 兩者都沒對上時再看字元，涵蓋回報方式不一樣的終端機。只認 0–8，其餘交給後面的按鍵處理。
     /// </summary>
     private static int? PaneDigit(ConsoleKeyInfo key)
     {
@@ -481,9 +625,9 @@ public sealed partial class DiagApp : IDisposable
 
         return key.Key switch
         {
-            >= ConsoleKey.D0 and <= ConsoleKey.D7 => key.Key - ConsoleKey.D0,
-            >= ConsoleKey.NumPad0 and <= ConsoleKey.NumPad7 => key.Key - ConsoleKey.NumPad0,
-            _ => key.KeyChar is >= '0' and <= '7' ? key.KeyChar - '0' : null,
+            >= ConsoleKey.D0 and <= ConsoleKey.D8 => key.Key - ConsoleKey.D0,
+            >= ConsoleKey.NumPad0 and <= ConsoleKey.NumPad8 => key.Key - ConsoleKey.NumPad0,
+            _ => key.KeyChar is >= '0' and <= '8' ? key.KeyChar - '0' : null,
         };
     }
 
@@ -554,12 +698,30 @@ public sealed partial class DiagApp : IDisposable
             case DiagView.Output:
                 outputScroll = Math.Max(0, outputScroll - delta);
                 break;
+            case DiagView.Debug:
+                IReadOnlyList<DebugFrame> frames = dap.Halted?.Frames ?? Array.Empty<DebugFrame>();
+                if (frames.Count > 0)
+                {
+                    debugFrameCursor = Math.Max(0, Math.Min(debugFrameCursor + delta, frames.Count - 1));
+                    dap.SelectFrame(debugFrameCursor);
+                }
+
+                break;
         }
     }
+
+    /// <summary>供 Ctrl+C 處理常式呼叫：走一般的收尾流程（等同按 q），不做任何強制動作。</summary>
+    public void RequestExit() => cts.Cancel();
 
     public void Dispose()
     {
         cts.Cancel();
+        dapPipe?.Dispose();
+        dap.Dispose();
+        // 跟 StopServer／RestartWithBuild 同一個收尾順序：wrapper 啟動（dotnet run 類）才會
+        // 留下 wrapper 行程，直接 launch 沒有 wrapper 可清，這裡呼叫也安全。少了這一行，
+        // 用 q／Ctrl+C 結束時 wrapper 型 serveCommand 的 dotnet run 行程會被留下孤兒行程。
+        server.CleanupDebugWrapper();
         monitor.Dispose();
         server.Dispose();
         debugOutput.Dispose();

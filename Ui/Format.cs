@@ -184,6 +184,9 @@ public static class Format
     public static string PadRightDisplay(string text, int width) =>
         text + new string(' ', Math.Max(0, width - DisplayWidth(text)));
 
+    /// <summary>量測含標記文字實際佔的格數：標記本身不會顯示，要先拿掉再算。</summary>
+    public static int MarkupWidth(string markup) => DisplayWidth(Markup.Remove(markup));
+
     private static bool IsWide(char c) =>
         c >= 0x1100
         && (
