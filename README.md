@@ -224,36 +224,38 @@ serve 面板顯示 `RUNNING (debug)`；`x` 這時會走 DAP `terminate` 而不�
 
 ### Neovim 設定
 
-`nvim/lua/clrdiag/` 是一支不依賴任何外部套件的最小 Lua 客戶端（唯一需求是 `clrdiag` 在
-`PATH` 上——管道名稱由 `clrdiag --pipe-name` 問出來，特意不在 Lua 端另外實作一份雜湊邏輯）。
-用 lazy.nvim 之類的套件管理器直接指向這個資料夾：
+Neovim 客戶端獨立成自己的 repo：**[LizardLiang/clrdiag.nvim](https://github.com/LizardLiang/clrdiag.nvim)**
+（MIT）。不依賴任何外部套件，唯一需求是 `clrdiag` 在 `PATH` 上——管道名稱由
+`clrdiag --pipe-name` 問出來，特意不在 Lua 端另外實作一份雜湊邏輯。
 
 ```lua
 {
-  dir = "C:/path/to/GSS_KPIM2104/tools/ClrDiag/nvim",
-  name = "clrdiag",
-  config = function()
-    require("clrdiag").setup({
-      -- root = "C:/path/to/project",  -- 省略時讓 ClrDiag 自行判斷（往上找 clrdiag.json / .git）
-      -- keymaps = false,             -- 傳 false 完全自己接鍵；預設鍵見下
-      -- notify_on_halt = true,       -- 中斷時是否跳通知
-      -- jump_on_halt = false,        -- 中斷時是否自動把游標跳過去；預設關閉，全程只看 ClrDiag 的 TUI
-      -- icons = {                    -- gutter 圖示，可個別覆寫
-      --   breakpoint = "●",            -- 已綁定（verified）的中斷點
-      --   breakpoint_unverified = "○", -- 尚未綁定的中斷點（刻意跟已綁定的圖示不同）
-      --   stop = "▶",                  -- 目前中斷所在行
-      --   statusline_pause = "⏸",      -- state():statusline() 用的前綴圖示
-      -- },
-      -- highlights = {               -- 對應的 highlight group 名稱，可個別覆寫成自己的顏色
-      --   breakpoint = "ClrDiagBreakpointSign",
-      --   breakpoint_unverified = "ClrDiagBreakpointUnverifiedSign",
-      --   stop = "ClrDiagStopSign",
-      --   stop_line = "ClrDiagStopLine",
-      -- },
-    })
-  end,
+  "LizardLiang/clrdiag.nvim",
+  ft = "cs",
+  opts = {
+    -- root = "C:/path/to/project",  -- 省略時讓 ClrDiag 自行判斷（往上找 clrdiag.json / .git）
+    -- keymaps = false,             -- 傳 false 完全自己接鍵；預設鍵見下
+    -- notify_on_halt = true,       -- 中斷時是否跳通知
+    -- jump_on_halt = false,        -- 中斷時是否自動把游標跳過去（含跨檔案：還沒開的檔案會自動開起來）
+    -- icons = {                    -- gutter 圖示，可個別覆寫
+    --   breakpoint = "●",            -- 已綁定（verified）的中斷點
+    --   breakpoint_unverified = "○", -- 尚未綁定的中斷點（刻意跟已綁定的圖示不同）
+    --   stop = "▶",                  -- 目前中斷所在行
+    --   statusline_pause = "⏸",      -- statusline() 用的前綴圖示
+    -- },
+    -- highlights = {               -- 對應的 highlight group 名稱，可個別覆寫成自己的顏色
+    --   breakpoint = "ClrDiagBreakpointSign",
+    --   breakpoint_unverified = "ClrDiagBreakpointUnverifiedSign",
+    --   stop = "ClrDiagStopSign",
+    --   stop_line = "ClrDiagStopLine",
+    -- },
+  },
 }
 ```
+
+> LazyVim 使用者注意：`dap.core` extra 已經佔住 `<leader>d*`，其中 `<leader>db` 正好是
+> nvim-dap 的切換中斷點，會跟下面的預設鍵直接對撞。傳 `keymaps = false` 再自己接一組
+> （例如 `<leader>D*`）就能避開。
 
 預設鍵(`opts.keymaps` 可覆寫個別項目，或整組傳 `false`)：
 
