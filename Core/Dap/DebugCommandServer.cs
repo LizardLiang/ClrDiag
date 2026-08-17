@@ -300,6 +300,12 @@ public sealed class DebugCommandServer : IDisposable
                     await session.PauseAsync(token).ConfigureAwait(false);
                     break;
 
+                // 只讀指令：刻意留空。switch 走完之後一定會回 BuildStateMessage()，空的 case
+                // 本身就等於「回一則目前狀態、零副作用」——客戶端要輪詢有沒有中斷時，不必再
+                // 借用 addWatch 這類冪等指令去間接把狀態問出來。
+                case "status":
+                    break;
+
                 default:
                     return ErrorState($"未知指令: {cmd}");
             }

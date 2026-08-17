@@ -319,9 +319,12 @@ sign group（`ClrDiagBreakpoints`、`ClrDiagStop`），不會跟 nvim-dap 或其
 | `stepIn`           | —                     | 進入函式                     |
 | `stepOut`          | —                     | 跳出函式                     |
 | `pause`            | —                     | 暫停                         |
+| `status`           | —                     | 只讀取目前狀態，不做任何動作 |
 
-`path` 逐字比對（不分大小寫，Windows 路徑），沒有正規化——這正是為什麼未驗證的中斷點
-一定要顯眼標示：來源路徑跟 PDB 對不起來是中斷點悄悄失效最常見的原因。
+`path` 在比對前只做一件正規化：`/` 一律換成 `\`（`DapSessionService.NormalizePath`），
+之後不分大小寫逐字比對。其餘一概不處理——相對路徑不會展開成絕對路徑，`..` 不會摺疊，
+短檔名不會還原。這正是為什麼未驗證的中斷點一定要顯眼標示：來源路徑跟 PDB 對不起來是
+中斷點悄悄失效最常見的原因。
 
 狀態回覆／推播的形狀（`sessionState` 是 `Idle`/`Connecting`/`Running`/`Halted`/`Terminated`/`Failed`
 其中之一；`threadId`/`stopReason`/`location`/`watchResults` 只在 `Halted` 且已完成擷取時出現）：
