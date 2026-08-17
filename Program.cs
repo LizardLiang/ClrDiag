@@ -312,6 +312,20 @@ ConsoleCancelEventHandler onCancel = (_, e) =>
 };
 Console.CancelKeyPress += onCancel;
 
+// 儀表板畫在終端機的「替代畫面緩衝區」（alternate screen buffer，就是 vim／less 用的那一塊）：
+// 進入時整個畫面換成一塊空白緩衝區，離開時原本的畫面與捲動歷史原封不動回來，儀表板本身
+// 不會留在捲動歷史裡。終端機不支援 ANSI（dumb terminal、部分 CI）時就照舊直接畫在主畫面，
+// 只是少了這層還原，不因為這個功能讓工具跑不起來。
+// 只有互動儀表板走這段：--render／--snapshot 等批次模式在上面就已經回傳，輸出保持純文字。
+// ESC 用字元碼寫，不把原始控制字元留在原始碼裡——它在編輯器與 diff 裡都是隱形的，很容易被改壞
+const char esc = (char)0x1b;
+bool alternateScreen = AnsiConsole.Profile.Capabilities.Ansi;
+if (alternateScreen)
+{
+    // ?1049h 切到替代緩衝區，[H 再把游標移到左上角
+    AnsiConsole.Write(new ControlCode($"{esc}[?1049h{esc}[H"));
+}
+
 try
 {
     app.Run(pid);
@@ -319,6 +333,18 @@ try
 finally
 {
     Console.CancelKeyPress -= onCancel;
+
+    // 不論是按 q、Ctrl+C 還是往外丟例外，都要在這裡把終端機還原。
+    // 放在 finally 是重點：例外的訊息要印在還原後的主畫面上才看得到——
+    // 印在即將被丟棄的替代緩衝區裡等於沒印。
+    if (alternateScreen)
+    {
+        // Live 結束時（正常結束與丟例外都算）會自己還原游標，這裡再確保一次：
+        // 切回主畫面後游標若還隱藏著，使用者拿到的就是一個看不見游標的 shell，
+        // 而多送一個控制碼的成本遠低於那個後果。
+        AnsiConsole.Cursor.Show();
+        AnsiConsole.Write(new ControlCode($"{esc}[?1049l"));
+    }
 }
 
 return 0;
