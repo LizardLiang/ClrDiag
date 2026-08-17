@@ -32,6 +32,8 @@ clrdiag                 # 互動式儀表板
 clrdiag --list          # 列出可監看的受控行程
 clrdiag --pid 12345     # 直接監看某個行程
 clrdiag --init          # 產生 clrdiag.json 範本
+
+clrdiag --install-skill global   # 安裝 Claude Code 技能（見「安裝 Claude Code 技能」一節）
 ```
 
 批次模式（不進互動介面，適合腳本、報告、問題回報）：
@@ -398,6 +400,40 @@ clrdiag --list
 ```
 
 After installation, run `clrdiag` from any .NET project directory. Run `clrdiag --init` only when that project needs build or server integration.
+
+## 安裝 Claude Code 技能
+
+技能檔（`SKILL.md` 與 `references/`）內嵌在組件裡，`--install-skill` 會把它們裝好，讓 Claude Code
+知道怎麼驅動這個工具：
+
+```powershell
+clrdiag --install-skill global                  # 裝到 %USERPROFILE%\.claude\skills\clrdiag
+clrdiag --install-skill local                   # 裝到 <專案根目錄>\.claude\skills\clrdiag
+clrdiag --install-skill local --root C:\proj    # 指定專案根目錄
+```
+
+範圍是必填，只能是 `global` 或 `local`。`local` 用的專案根目錄跟其他指令同一套解析邏輯，
+所以可以搭配 `--root`。安裝完要開新的 Claude Code 工作階段才會載入。
+
+**運作方式**：技能檔先解壓到固定快取路徑
+`%LOCALAPPDATA%\clrdiag\skills\clrdiag`，安裝位置只放一個指向該快取的連結。
+快取路徑刻意不含版本號，所以升級 clrdiag 後只要重跑一次 `--install-skill`，
+全域與每個專案的連結都會同時看到新內容，不必逐一重裝。
+
+**連結型式**：優先建立符號連結（symlink）；沒有開發人員模式或系統管理員權限時會自動退回
+目錄連接點（junction）。junction 不需要提權，權限受限的公司電腦也裝得起來。
+實際用了哪一種會印在成功訊息裡。兩種都失敗時會印出原因並以非 0 結束碼結束。
+
+**安裝位置已經有東西**：
+
+| 現況              | 行為                                             |
+| ----------------- | ------------------------------------------------ |
+| 不存在            | 直接建立連結（缺的上層目錄會一併建立）           |
+| 已經是連結        | 刪掉舊連結後重建，重跑安裝是冪等的               |
+| 是真實目錄或檔案  | **拒絕並以非 0 結束**，除非加上 `--force`         |
+
+`--force` 會遞迴刪除該位置的真實內容再建立連結，並印出刪掉了什麼。
+沒有 `--force` 就絕不會刪掉真實檔案。
 
 ## Publish Without The SDK
 

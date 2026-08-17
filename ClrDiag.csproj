@@ -16,7 +16,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>clrdiag</ToolCommandName>
     <PackageId>ClrDiag.Console</PackageId>
-    <Version>0.2.1</Version>
+    <Version>0.3.0</Version>
     <Description>Windows x64 .NET memory and thread diagnostics console.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
@@ -30,5 +30,12 @@
   </ItemGroup>
   <ItemGroup>
     <None Update="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+  <!-- Claude Code 技能檔內嵌進組件：install-skill 指令會把它們解壓到 %LOCALAPPDATA% 快取，
+       再從安裝位置建立符號連結。內嵌是唯一的散布方式，nupkg 靠組件本身帶走這些檔案。 -->
+  <ItemGroup>
+    <EmbeddedResource Include="skills\clrdiag\**\*.md">
+      <LogicalName>skill/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 </Project>

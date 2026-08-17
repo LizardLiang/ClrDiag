@@ -27,6 +27,9 @@ bool listMode = false;
 bool buildMode = false;
 bool dapMode = false;
 bool pipeNameMode = false;
+bool installSkillMode = false;
+bool force = false;
+string? installSkillScope = null;
 string? sendCommand = null;
 string? buildConfiguration = null;
 int renderWidth = 120;
@@ -86,6 +89,19 @@ for (int i = 0; i < args.Length; i++)
         case "--init":
             initMode = true;
             break;
+        case "--install-skill":
+            installSkillMode = true;
+            // 範圍是必填；這裡先收下值，缺漏或拼錯留到迴圈後統一報錯，
+            // 才能印出這個旗標自己的用法而不是整份說明
+            if (i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
+            {
+                installSkillScope = args[++i];
+            }
+
+            break;
+        case "--force":
+            force = true;
+            break;
         case "--build":
             buildMode = true;
             // 後面若不是另一個參數，就當成建置設定名稱（--build Release）
@@ -110,6 +126,20 @@ for (int i = 0; i < args.Length; i++)
             PrintHelp();
             return 2;
     }
+}
+
+// --install-skill 的範圍先驗證：值缺漏或不是 global／local 都算參數錯誤，
+// 用跟未知參數同一個結束碼 2
+SkillScope? skillScope = SkillInstaller.ParseScope(installSkillScope);
+if (installSkillMode && skillScope is null)
+{
+    AnsiConsole.MarkupLine(
+        installSkillScope is null
+            ? "[red]--install-skill 需要指定範圍（global 或 local）[/]"
+            : $"[red]--install-skill 的範圍只能是 global 或 local:[/] {Markup.Escape(installSkillScope)}"
+    );
+    SkillInstaller.PrintUsage();
+    return 2;
 }
 
 // 這幾個非互動批次模式（設計上就是給重新導向到檔案／管線，或代理程式讀取用）必須輸出 UTF-8：
@@ -140,6 +170,13 @@ int effectivePort = port ?? config.Port;
 if (initMode)
 {
     return RunInit(config);
+}
+
+// 安裝 Claude Code 技能：跟 --init 一樣是一次性動作，做完就結束，不進診斷流程。
+// local 範圍直接沿用 DiagConfig 解析好的專案根目錄，所以 --root 可以一起用。
+if (skillScope is not null)
+{
+    return SkillInstaller.Install(skillScope.Value, config.Root, force);
 }
 
 if (listMode)
@@ -775,6 +812,8 @@ static void PrintHelp()
           clrdiag --send '<json>'       對本機（或 --pid 對應）專案的除錯指令管道送一個指令並印出回覆
           clrdiag --render              把九個面板渲染成純文字（可貼進問題回報）
           clrdiag --init                在專案根目錄產生 clrdiag.json 範本
+          clrdiag --install-skill       安裝 Claude Code 技能（後接 global 或 local）
+          clrdiag --force               搭配 --install-skill：安裝位置已有真實目錄時覆寫它
           clrdiag --config <path>       指定設定檔
           clrdiag --root <path>         指定專案根目錄
 
