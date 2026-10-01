@@ -136,6 +136,16 @@ public sealed class ProjectStateStore
         );
     }
 
+    /// <summary>
+    /// 在同一次「讀取 → 修改 → 寫回」中設定預設專案，clearLastRun 為 true 時一併清除上次執行記錄；
+    /// 用於選單設為預設時同時移除已不存在的記錄。回傳是否成功寫入。
+    /// </summary>
+    public bool SetDefault(string workingDir, string projectPath, bool clearLastRun) =>
+        Update(
+            workingDir,
+            s => s with { Default = Path.GetFullPath(projectPath), LastRun = clearLastRun ? null : s.LastRun }
+        );
+
     /// <summary>把工作目錄轉成狀態檔的鍵：完整路徑、去掉結尾分隔符、轉小寫。</summary>
     public static string NormalizeKey(string workingDir) =>
         Path.GetFullPath(workingDir).TrimEnd('\\', '/').ToLowerInvariant();

@@ -113,7 +113,7 @@ public static class ProjectSelection
                 return new ProjectSelectionResult(use.Project, SourceLabel(use.Source), null, null);
 
             case ResolveOutcome.Prompt choose:
-                return RunPrompt(store, workingDir, choose, saved, prompt, ClearStale, notice);
+                return RunPrompt(store, workingDir, choose, saved, prompt, resolution, ClearStale, notice);
 
             case ResolveOutcome.Error error:
                 return new ProjectSelectionResult(
@@ -129,8 +129,8 @@ public static class ProjectSelection
     }
 
     /// <summary>
-    /// 顯示選單並處理結果：取消時不寫入任何記錄；選定專案後先呼叫 clearStale 移除已失效的記錄，
-    /// 使用者同意時再寫入預設專案。
+    /// 顯示選單並處理結果：取消時不寫入任何記錄。使用者同意設為預設時，以一次寫入設定預設專案
+    /// 並移除已失效的上次執行記錄（已失效的預設由新的預設取代）；否則呼叫 clearStale 移除已失效的記錄。
     /// </summary>
     private static ProjectSelectionResult RunPrompt(
         ProjectStateStore store,
@@ -138,6 +138,7 @@ public static class ProjectSelection
         ResolveOutcome.Prompt choose,
         ProjectState saved,
         Func<IReadOnlyList<DiscoveredProject>, DiscoveredProject?, ProjectState, ProjectPick?> prompt,
+        ProjectResolution resolution,
         Action clearStale,
         Action<string> notice
     )
@@ -149,18 +150,17 @@ public static class ProjectSelection
             return new ProjectSelectionResult(null, null, CancelExitCode, null);
         }
 
-        clearStale();
-
-        string label = "選單";
-        if (picked.SetAsDefault)
+        if (!picked.SetAsDefault)
         {
-            if (store.SetDefault(workingDir, picked.Project.FullPath))
-                label = "選單，已設為預設";
-            else
-                notice(store.WriteFailureMessage);
+            clearStale();
+            return new ProjectSelectionResult(picked.Project, "選單", null, null);
         }
 
-        return new ProjectSelectionResult(picked.Project, label, null, null);
+        if (store.SetDefault(workingDir, picked.Project.FullPath, resolution.StaleLastRun))
+            return new ProjectSelectionResult(picked.Project, "選單，已設為預設", null, null);
+
+        notice(store.WriteFailureMessage);
+        return new ProjectSelectionResult(picked.Project, "選單", null, null);
     }
 
     /// <summary>

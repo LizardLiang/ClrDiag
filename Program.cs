@@ -164,15 +164,25 @@ if (installSkillMode && skillScope is null)
     return 2;
 }
 
-// 這幾個非互動批次模式（設計上就是給重新導向到檔案／管線，或代理程式讀取用）必須輸出 UTF-8：
+// 所有非互動模式（設計上就是給重新導向到檔案／管線，或代理程式讀取用）的標準輸出與標準錯誤都是 UTF-8：
 // 不主動設定的話 Console 會沿用作業系統目前的主控台字碼頁（繁體中文 Windows 預設是 Big5 950），
-// 寫進檔案後任何用 UTF-8 讀取的消費端（例如本檔案）看到的都是亂碼。互動式儀表板刻意不套用這段，
-// 免得動到 Spectre.Console 畫框線／版面時的終端機能力偵測。一定要搶在第一次呼叫 AnsiConsole
-// 之前設定——包括下面 DiagConfig.Load 失敗時的錯誤訊息——Spectre 的 Profile 是第一次使用時
+// 寫進檔案後任何用 UTF-8 讀取的消費端（例如本檔案）看到的都是亂碼。互動式儀表板不套用這段，
+// 免得動到 Spectre.Console 畫框線／版面時的終端機能力偵測。這段設定位於第一次呼叫 AnsiConsole
+// 之前——包括下面 DiagConfig.Load 失敗時的錯誤訊息——Spectre 的 Profile 是第一次使用時
 // 惰性建立並快取，事後才改字碼頁不會讓已經印出的內容或已快取的判斷跟著變。
 bool batchOutputMode = dapMode || snapshotMode || threadMode || rootsType is not null || renderMode || outputMode;
 bool projectCommandMode = projectsMode || setDefaultQuery is not null || clearDefaultMode;
-if (batchOutputMode || projectCommandMode)
+bool nonInteractiveFlag =
+    batchOutputMode
+    || projectCommandMode
+    || listMode
+    || initMode
+    || buildMode
+    || exportMode
+    || sendCommand is not null
+    || pipeNameMode
+    || installSkillMode;
+if (nonInteractiveFlag)
 {
     Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 }
@@ -191,15 +201,7 @@ bool usesDiscovery = ProjectSelection.UsesDiscovery(outputMode, initMode, skillS
 // 只有互動時才會顯示選單、寫入記錄；不可互動時與批次模式一樣解析專案。
 // 這裡位於上面的 UTF-8 設定之後才讀取 AnsiConsole.Profile，符合該處說明的初始化順序。
 bool interactive = ProjectSelection.IsInteractive(
-    batchOutputMode
-        || projectCommandMode
-        || listMode
-        || initMode
-        || buildMode
-        || exportMode
-        || sendCommand is not null
-        || pipeNameMode
-        || installSkillMode,
+    nonInteractiveFlag,
     Console.IsInputRedirected,
     Console.IsOutputRedirected,
     () => AnsiConsole.Profile.Capabilities.Interactive
@@ -508,27 +510,35 @@ static int MissingValue(string flag)
     return 2;
 }
 
-/// <summary>印出比對失敗的訊息與候選專案的相對路徑；沒有候選時說明工作目錄底下沒有專案。</summary>
+/// <summary>
+/// 寫到標準錯誤的 Spectre 主控台：專案比對失敗與專案管理指令的錯誤訊息寫在這裡，標準輸出只留給結果。
+/// 標準錯誤接在終端機上時保留顏色，重新導向時輸出純文字。
+/// </summary>
+static IAnsiConsole StandardError() =>
+    AnsiConsole.Create(new AnsiConsoleSettings { Out = new AnsiConsoleOutput(Console.Error) });
+
+/// <summary>在標準錯誤印出比對失敗的訊息與候選專案的相對路徑；沒有候選時說明工作目錄底下沒有專案。</summary>
 static void PrintProjectCandidates(ProjectMiss miss)
 {
-    AnsiConsole.MarkupLine($"[red]{Markup.Escape(miss.Message)}[/]");
+    IAnsiConsole error = StandardError();
+    error.MarkupLine($"[red]{Markup.Escape(miss.Message)}[/]");
     if (miss.Candidates.Count == 0)
     {
-        AnsiConsole.MarkupLine(
-            $"  （工作目錄底下沒有偵測到任何 {Markup.Escape(ProjectDiscovery.ExtensionList)}）"
-        );
+        error.MarkupLine($"  （工作目錄底下沒有偵測到任何 {Markup.Escape(ProjectDiscovery.ExtensionList)}）");
         return;
     }
 
     foreach (DiscoveredProject candidate in miss.Candidates)
     {
-        AnsiConsole.MarkupLine($"  {Markup.Escape(candidate.RelativePath)}");
+        error.MarkupLine($"  {Markup.Escape(candidate.RelativePath)}");
     }
 }
 
-/// <summary>專案管理指令寫入記錄失敗時的錯誤訊息（紅色）；其餘流程的寫入失敗交給 NoticeWriter 提示。</summary>
+/// <summary>
+/// 專案管理指令寫入記錄失敗時，在標準錯誤印出錯誤訊息（紅色）；其餘流程的寫入失敗交給 NoticeWriter 提示。
+/// </summary>
 static void PrintStoreWriteError(ProjectStateStore store) =>
-    AnsiConsole.MarkupLine($"[red]{Markup.Escape(store.WriteFailureMessage)}[/]");
+    StandardError().MarkupLine($"[red]{Markup.Escape(store.WriteFailureMessage)}[/]");
 
 /// <summary>
 /// --clear-default、--set-default、--projects：管理工作目錄的預設專案並列出偵測到的專案。
@@ -602,12 +612,12 @@ static int ApplySetDefault(
     return 0;
 }
 
-/// <summary>--projects：列出偵測到的專案與預設、上次執行標記。沒有任何專案時回傳 1。</summary>
+/// <summary>--projects：在標準輸出列出偵測到的專案與預設、上次執行標記。沒有任何專案時在標準錯誤說明並回傳 1。</summary>
 static int PrintProjectTable(ProjectStateStore store, string workingDir, IReadOnlyList<DiscoveredProject> discovered)
 {
     if (discovered.Count == 0)
     {
-        AnsiConsole.MarkupLine($"[red]找不到任何 {Markup.Escape(ProjectDiscovery.ExtensionList)}[/]");
+        StandardError().MarkupLine($"[red]找不到任何 {Markup.Escape(ProjectDiscovery.ExtensionList)}[/]");
         return 1;
     }
 

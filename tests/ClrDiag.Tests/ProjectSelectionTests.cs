@@ -284,6 +284,60 @@ public sealed class ProjectSelectionTests : IDisposable
     }
 
     [Fact]
+    public void Resolve_記錄失效時選單設為預設以一次寫入清除並設定()
+    {
+        TwoProjects();
+        var store = new ProjectStateStore(StorePath);
+        var gone = _tree.File("work/Gone/Gone.csproj");
+        Directory.CreateDirectory(WorkDir);
+        store.SetDefault(WorkDir, gone);
+        store.SetLastRun(WorkDir, gone);
+        File.Delete(gone);
+
+        var result = Resolve(store, prompt: projects => new ProjectPick(projects[1], true));
+
+        Assert.Equal(new ProjectState { Default = result.Project!.FullPath }, store.Get(WorkDir) with { Updated = null });
+        Assert.Equal("選單，已設為預設", result.Label);
+        Assert.Empty(_notices);
+    }
+
+    [Fact]
+    public void Resolve_記錄失效且檔案鎖逾時時只提示一次寫入失敗()
+    {
+        TwoProjects();
+        var gone = _tree.File("work/Gone/Gone.csproj");
+        Directory.CreateDirectory(WorkDir);
+        new ProjectStateStore(StorePath).SetDefault(WorkDir, gone);
+        File.Delete(gone);
+        var store = new ProjectStateStore(StorePath, lockTimeout: TimeSpan.FromMilliseconds(50));
+
+        using var held = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var holder = new Thread(() =>
+        {
+            using var mutex = new Mutex(false, ProjectStateStore.MutexNameFor(StorePath));
+            mutex.WaitOne();
+            held.Set();
+            release.Wait();
+            mutex.ReleaseMutex();
+        });
+        holder.Start();
+        held.Wait();
+        try
+        {
+            var result = Resolve(store, prompt: projects => new ProjectPick(projects[1], true));
+
+            Assert.Equal("選單", result.Label);
+            Assert.Equal(new[] { store.WriteFailureMessage }, _notices);
+        }
+        finally
+        {
+            release.Set();
+            holder.Join();
+        }
+    }
+
+    [Fact]
     public void Resolve_批次模式不移除已失效的記錄()
     {
         _tree.File("work/A/A.csproj");

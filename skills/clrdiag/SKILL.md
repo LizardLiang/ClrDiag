@@ -74,11 +74,16 @@ a `clrdiag.json` above it sets the root. `--root <path>` and `--config <path>`
 skip the scan. `--root` also sets the project root that derives the debug pipe name.
 `--init`, `--install-skill`, and `--output` also skip the scan. A warning
 names any flag that has no effect in the given combination.
-The scan skips junctions and symbolic links. It stops after 20,000 folders
+The scan skips junctions and symbolic links. It enters OneDrive folders, which carry
+a reparse point but are not links. It stops after 20,000 folders
 (or after 10 seconds on a slow network drive) and prints a notice.
 Pass `--project` or `--root` when you see that notice.
 In batch commands, warnings and notices go to stderr as plain text.
 Stdout holds only the command result, so `--pipe-name` prints only the pipe name.
+A `--project` or `--set-default` miss prints its error and candidates to stderr.
+A failed record write and an empty `--projects` result also go to stderr.
+Exit codes do not change. The `--projects` table stays on stdout.
+In batch commands, stdout and stderr are UTF-8 without a BOM.
 Run `clrdiag --projects` to see the projects found, with the default (`★ 預設`)
 and last-run (`◎ 上次`) markers.
 

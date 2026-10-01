@@ -67,6 +67,71 @@ public sealed class ProjectDiscoveryTests : IDisposable
         }
     }
 
+    // OneDrive 同步根目錄與「檔案隨選」資料夾帶有 ReparsePoint 屬性但不是連結，LinkTarget 為 null。
+    // 這種 reparse point 只能由雲端同步提供者建立，測試無法在暫存資料夾重現，
+    // 因此以 (屬性, 連結目標) 直接驗證判斷規則：只有連結目標不為 null 的資料夾不進入。
+    [Theory]
+    [InlineData(FileAttributes.Directory, null, true)]
+    [InlineData(FileAttributes.Directory | FileAttributes.ReparsePoint, null, true)]
+    [InlineData(
+        FileAttributes.Directory | FileAttributes.ReparsePoint | FileAttributes.Offline | FileAttributes.ReadOnly,
+        null,
+        true
+    )]
+    [InlineData(FileAttributes.Directory | FileAttributes.ReparsePoint, @"C:\target", false)]
+    public void ShouldEnter_只略過連結點與符號連結(FileAttributes attributes, string? linkTarget, bool expected)
+    {
+        Assert.Equal(expected, ProjectDiscovery.ShouldEnter("Folder", attributes, () => linkTarget));
+    }
+
+    [Fact]
+    public void ShouldEnter_一般資料夾不查詢連結目標()
+    {
+        var asked = false;
+
+        var result = ProjectDiscovery.ShouldEnter(
+            "Folder",
+            FileAttributes.Directory,
+            () =>
+            {
+                asked = true;
+                return null;
+            }
+        );
+
+        Assert.True(result);
+        Assert.False(asked);
+    }
+
+    [Fact]
+    public void ShouldEnter_無法讀取連結目標時不進入()
+    {
+        Assert.False(
+            ProjectDiscovery.ShouldEnter(
+                "Folder",
+                FileAttributes.Directory | FileAttributes.ReparsePoint,
+                () => throw new IOException("reparse")
+            )
+        );
+    }
+
+    [Fact]
+    public void Scan_進入沒有連結的一般資料夾()
+    {
+        _tree.File("Cloud/Sub/App.csproj");
+        File.SetAttributes(_tree.PathOf("Cloud"), FileAttributes.Directory | FileAttributes.ReadOnly);
+        try
+        {
+            var result = ProjectDiscovery.Scan(_tree.Root).Projects;
+
+            Assert.Equal(new[] { "Cloud/Sub/App.csproj" }, Paths(result));
+        }
+        finally
+        {
+            File.SetAttributes(_tree.PathOf("Cloud"), FileAttributes.Directory);
+        }
+    }
+
     [Theory]
     [InlineData("..foo/A.csproj", true)]
     [InlineData("sub/..bar/B.csproj", true)]

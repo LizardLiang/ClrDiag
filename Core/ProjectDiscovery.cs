@@ -61,7 +61,7 @@ public static class ProjectDiscovery
     /// <summary>
     /// 以廣度優先掃描 workingDir 與其子資料夾。workingDir 本身是第 0 層，
     /// 第 maxDepth 層的資料夾仍會檢查，更深的不再進入。無法讀取的資料夾直接略過；
-    /// 連結點與符號連結（reparse point）的資料夾不進入，避免重複列出專案或繞成迴圈。
+    /// 連結點與符號連結的資料夾不進入，避免重複列出專案或繞成迴圈；其他 reparse point（例如 OneDrive）照常進入。
     /// 檢查的資料夾數達到 maxFolders 或耗時超過 timeBudget（預設 DefaultTimeBudget）時停止，
     /// 回傳已找到的專案並把 Truncated 設為 true；廣度優先讓淺層的專案先被找到。
     /// </summary>
@@ -219,11 +219,31 @@ public static class ProjectDiscovery
         return firstSegment != "..";
     }
 
-    /// <summary>掃描是否進入這個子資料夾：略過清單中的名稱、以「.」開頭的資料夾與 reparse point。</summary>
     private static bool ShouldEnter(DirectoryInfo folder) =>
-        !folder.Name.StartsWith('.')
-        && !SkippedFolders.Contains(folder.Name)
-        && !folder.Attributes.HasFlag(FileAttributes.ReparsePoint);
+        ShouldEnter(folder.Name, folder.Attributes, () => folder.LinkTarget);
+
+    /// <summary>
+    /// 掃描是否進入這個子資料夾：略過清單中的名稱、以「.」開頭的資料夾，以及連結點與符號連結。
+    /// 帶有 ReparsePoint 屬性但 linkTarget 回傳 null 的資料夾（例如 OneDrive 同步根目錄與「檔案隨選」資料夾）照常進入；
+    /// 只有帶 ReparsePoint 屬性時才呼叫 linkTarget，讀取連結目標失敗時視為連結而不進入。
+    /// </summary>
+    public static bool ShouldEnter(string name, FileAttributes attributes, Func<string?> linkTarget)
+    {
+        if (name.StartsWith('.') || SkippedFolders.Contains(name))
+            return false;
+
+        if (!attributes.HasFlag(FileAttributes.ReparsePoint))
+            return true;
+
+        try
+        {
+            return linkTarget() is null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
 
     private static DiscoveredProject Describe(string root, string file) =>
         new(file, RelativePathOf(root, file), Path.GetFileNameWithoutExtension(file));
