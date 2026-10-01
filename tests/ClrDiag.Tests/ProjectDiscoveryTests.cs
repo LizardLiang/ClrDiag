@@ -71,17 +71,30 @@ public sealed class ProjectDiscoveryTests : IDisposable
     // 這種 reparse point 只能由雲端同步提供者建立，測試無法在暫存資料夾重現，
     // 因此以 (屬性, 連結目標) 直接驗證判斷規則：只有連結目標不為 null 的資料夾不進入。
     [Theory]
-    [InlineData(FileAttributes.Directory, null, true)]
-    [InlineData(FileAttributes.Directory | FileAttributes.ReparsePoint, null, true)]
+    [InlineData(FileAttributes.Directory, null, FolderEntry.Enter)]
+    [InlineData(FileAttributes.Directory | FileAttributes.ReparsePoint, null, FolderEntry.Enter)]
     [InlineData(
         FileAttributes.Directory | FileAttributes.ReparsePoint | FileAttributes.Offline | FileAttributes.ReadOnly,
         null,
-        true
+        FolderEntry.Enter
     )]
-    [InlineData(FileAttributes.Directory | FileAttributes.ReparsePoint, @"C:\target", false)]
-    public void ShouldEnter_只略過連結點與符號連結(FileAttributes attributes, string? linkTarget, bool expected)
+    [InlineData(FileAttributes.Directory | FileAttributes.ReparsePoint, @"C:\target", FolderEntry.Skip)]
+    internal void ShouldEnter_只略過連結點與符號連結(
+        FileAttributes attributes,
+        string? linkTarget,
+        FolderEntry expected
+    )
     {
         Assert.Equal(expected, ProjectDiscovery.ShouldEnter("Folder", attributes, () => linkTarget));
+    }
+
+    [Theory]
+    [InlineData(".git")]
+    [InlineData("bin")]
+    [InlineData("node_modules")]
+    public void ShouldEnter_略過清單中的名稱(string name)
+    {
+        Assert.Equal(FolderEntry.Skip, ProjectDiscovery.ShouldEnter(name, FileAttributes.Directory, () => null));
     }
 
     [Fact]
@@ -99,24 +112,20 @@ public sealed class ProjectDiscoveryTests : IDisposable
             }
         );
 
-        Assert.True(result);
+        Assert.Equal(FolderEntry.Enter, result);
         Assert.False(asked);
     }
 
     [Fact]
-    public void ShouldEnter_無法讀取連結目標時呼叫unreadable()
+    public void ShouldEnter_無法存取連結目標時回傳UnreadableLink()
     {
-        var count = 0;
-
         var result = ProjectDiscovery.ShouldEnter(
             "Folder",
             FileAttributes.Directory | FileAttributes.ReparsePoint,
-            () => throw new UnauthorizedAccessException("reparse"),
-            () => count++
+            () => throw new UnauthorizedAccessException("reparse")
         );
 
-        Assert.False(result);
-        Assert.Equal(1, count);
+        Assert.Equal(FolderEntry.UnreadableLink, result);
     }
 
     [Theory]
@@ -136,9 +145,10 @@ public sealed class ProjectDiscoveryTests : IDisposable
     }
 
     [Fact]
-    public void ShouldEnter_無法讀取連結目標時不進入()
+    public void ShouldEnter_無法讀取連結目標時回傳UnreadableLink()
     {
-        Assert.False(
+        Assert.Equal(
+            FolderEntry.UnreadableLink,
             ProjectDiscovery.ShouldEnter(
                 "Folder",
                 FileAttributes.Directory | FileAttributes.ReparsePoint,

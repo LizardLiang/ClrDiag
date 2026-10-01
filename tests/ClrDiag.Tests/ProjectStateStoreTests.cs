@@ -230,6 +230,22 @@ public sealed class ProjectStateStoreTests : IDisposable
         Assert.Null(store.Get(_tree.Root).LastRun);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SetDefault依clearLastRun決定是否清除上次執行(bool clearLastRun)
+    {
+        var project = _tree.File("A/A.csproj");
+        var other = _tree.File("B/B.csproj");
+        var store = new ProjectStateStore(StorePath);
+        store.SetLastRun(_tree.Root, other);
+
+        Assert.True(store.SetDefault(_tree.Root, project, clearLastRun));
+
+        Assert.Equal(project, store.Get(_tree.Root).Default);
+        Assert.Equal(clearLastRun ? null : other, store.Get(_tree.Root).LastRun);
+    }
+
     [Fact]
     public void Clear兩個欄位都不清除時不建立狀態檔()
     {

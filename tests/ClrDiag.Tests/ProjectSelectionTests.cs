@@ -21,7 +21,7 @@ public sealed class ProjectSelectionTests : IDisposable
         bool pick = false,
         bool interactive = true,
         Func<IReadOnlyList<DiscoveredProject>, ProjectPick?>? prompt = null,
-        bool ambiguousFallsBackUpward = false
+        AmbiguityPolicy ambiguity = AmbiguityPolicy.Error
     )
     {
         Directory.CreateDirectory(WorkDir);
@@ -37,7 +37,7 @@ public sealed class ProjectSelectionTests : IDisposable
                 return prompt is null ? new ProjectPick(projects[0], false) : prompt(projects);
             },
             _notices.Add,
-            ambiguousFallsBackUpward
+            ambiguity
         );
     }
 
@@ -178,12 +178,63 @@ public sealed class ProjectSelectionTests : IDisposable
     {
         TwoProjects();
 
-        var result = Resolve(new ProjectStateStore(StorePath), interactive: false, ambiguousFallsBackUpward: true);
+        var result = Resolve(new ProjectStateStore(StorePath), interactive: false, ambiguity: AmbiguityPolicy.FallBackUpward);
 
         Assert.Equal(new ProjectSelectionResult(null, null, null, null), result);
         Assert.Contains(ProjectSelection.AmbiguousListNotice, _notices);
         Assert.Equal(0, _promptCalls);
         Assert.False(File.Exists(StorePath));
+    }
+
+    [Theory]
+    [InlineData(true, false, "記錄的預設專案已不存在")]
+    [InlineData(false, true, "記錄的上次執行專案已不存在")]
+    [InlineData(true, true, "記錄的預設與上次執行專案已不存在")]
+    public void Resolve_list改走往上搜尋時提示已失效的記錄且不寫入(
+        bool staleDefault,
+        bool staleLastRun,
+        string expected
+    )
+    {
+        TwoProjects();
+        var store = new ProjectStateStore(StorePath);
+        var gone = _tree.File("work/Gone/Gone.csproj");
+        Directory.CreateDirectory(WorkDir);
+        if (staleDefault)
+            store.SetDefault(WorkDir, gone);
+        if (staleLastRun)
+            store.SetLastRun(WorkDir, gone);
+        File.Delete(gone);
+        var before = File.ReadAllText(StorePath);
+
+        var result = Resolve(store, interactive: false, ambiguity: AmbiguityPolicy.FallBackUpward);
+
+        Assert.Equal(new ProjectSelectionResult(null, null, null, null), result);
+        var notice = Assert.Single(_notices);
+        Assert.StartsWith(ProjectSelection.AmbiguousListNotice, notice);
+        Assert.Contains(expected, notice);
+        Assert.Contains("--set-default", notice);
+        Assert.Equal(before, File.ReadAllText(StorePath));
+    }
+
+    [Fact]
+    public void Resolve_沒有任何專案時即使記錄已失效也不提示()
+    {
+        var store = new ProjectStateStore(StorePath);
+        var gone = _tree.File("work/Gone/Gone.csproj");
+        store.SetDefault(WorkDir, gone);
+        File.Delete(gone);
+
+        var result = Resolve(store, interactive: false, ambiguity: AmbiguityPolicy.FallBackUpward);
+
+        Assert.Equal(new ProjectSelectionResult(null, null, null, null), result);
+        Assert.Empty(_notices);
+    }
+
+    [Fact]
+    public void AmbiguousListNoticeFor_沒有失效記錄時只有多個專案的提示()
+    {
+        Assert.Equal(ProjectSelection.AmbiguousListNotice, ProjectSelection.AmbiguousListNoticeFor(false, false));
     }
 
     [Fact]
@@ -195,7 +246,7 @@ public sealed class ProjectSelectionTests : IDisposable
             new ProjectStateStore(StorePath),
             project: "Nope",
             interactive: false,
-            ambiguousFallsBackUpward: true
+            ambiguity: AmbiguityPolicy.FallBackUpward
         );
 
         Assert.Equal(2, result.ExitCode);
@@ -205,7 +256,7 @@ public sealed class ProjectSelectionTests : IDisposable
     [Fact]
     public void Resolve_沒有任何專案改走往上搜尋時不提示多個專案()
     {
-        var result = Resolve(new ProjectStateStore(StorePath), interactive: false, ambiguousFallsBackUpward: true);
+        var result = Resolve(new ProjectStateStore(StorePath), interactive: false, ambiguity: AmbiguityPolicy.FallBackUpward);
 
         Assert.Equal(new ProjectSelectionResult(null, null, null, null), result);
         Assert.Empty(_notices);

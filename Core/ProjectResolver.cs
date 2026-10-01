@@ -16,6 +16,26 @@ public enum ProjectSource
     LastRun,
 }
 
+/// <summary>非互動模式有多個專案且沒有可用的記錄時的處理方式。</summary>
+public enum AmbiguityPolicy
+{
+    /// <summary>回傳 Error 並列出候選專案。</summary>
+    Error,
+
+    /// <summary>回傳 FallBackUpward，改走往上搜尋專案根目錄（--list）。</summary>
+    FallBackUpward,
+}
+
+/// <summary>回傳 FallBackUpward 的原因，呼叫端依此決定是否提示使用者。</summary>
+public enum FallBackReason
+{
+    /// <summary>工作目錄底下沒有任何專案。</summary>
+    NoProjects,
+
+    /// <summary>非互動模式有多個專案且沒有可用的記錄，呼叫端以 AmbiguityPolicy.FallBackUpward 允許往上搜尋。</summary>
+    AmbiguousList,
+}
+
 /// <summary>專案解析的結果；呼叫端依子型別決定直接啟動、顯示選單、改走往上搜尋或回報錯誤。</summary>
 public abstract record ResolveOutcome
 {
@@ -27,10 +47,10 @@ public abstract record ResolveOutcome
         : ResolveOutcome;
 
     /// <summary>
-    /// 沿用往上搜尋專案根目錄的行為：工作目錄底下沒有任何專案，
+    /// 沿用往上搜尋專案根目錄的行為；Reason 說明原因：工作目錄底下沒有任何專案，
     /// 或呼叫端允許（--list）時非互動模式遇到多個專案且沒有可用的記錄。
     /// </summary>
-    public sealed record FallBackUpward : ResolveOutcome;
+    public sealed record FallBackUpward(FallBackReason Reason) : ResolveOutcome;
 
     /// <summary>無法決定專案；Candidates 是要列給使用者參考的專案。</summary>
     public sealed record Error(string Message, IReadOnlyList<DiscoveredProject> Candidates) : ResolveOutcome;
@@ -52,8 +72,8 @@ public static class ProjectResolver
     /// 解析要使用的專案。projectQuery 是 --project 的值，不為 null 就代表有指定：
     /// 空白或沒有唯一符合（包括工作目錄底下沒有任何專案）時回傳 Error。
     /// pick 對應 --pick，只在互動模式生效；interactive 表示可以顯示選單。
-    /// ambiguousFallsBackUpward 為 true 時，非互動模式有多個專案且沒有可用的記錄回傳 FallBackUpward 而不是 Error；
-    /// --project 沒有唯一符合時仍回傳 Error。
+    /// ambiguity 為 AmbiguityPolicy.FallBackUpward 時，非互動模式有多個專案且沒有可用的記錄回傳
+    /// FallBackUpward(AmbiguousList) 而不是 Error；--project 沒有唯一符合時仍回傳 Error。
     /// </summary>
     public static ProjectResolution Resolve(
         IReadOnlyList<DiscoveredProject> discovered,
@@ -61,7 +81,7 @@ public static class ProjectResolver
         string? projectQuery,
         bool pick,
         bool interactive,
-        bool ambiguousFallsBackUpward = false
+        AmbiguityPolicy ambiguity = AmbiguityPolicy.Error
     )
     {
         var defaultProject = FindSaved(discovered, saved.Default, out var staleDefault);
@@ -80,7 +100,7 @@ public static class ProjectResolver
         }
 
         if (discovered.Count == 0)
-            return Result(new ResolveOutcome.FallBackUpward());
+            return Result(new ResolveOutcome.FallBackUpward(FallBackReason.NoProjects));
 
         if (interactive && pick)
             return Result(new ResolveOutcome.Prompt(discovered, lastRunProject));
@@ -97,8 +117,8 @@ public static class ProjectResolver
         if (lastRunProject is not null)
             return Result(new ResolveOutcome.Use(lastRunProject, ProjectSource.LastRun));
 
-        if (ambiguousFallsBackUpward)
-            return Result(new ResolveOutcome.FallBackUpward());
+        if (ambiguity == AmbiguityPolicy.FallBackUpward)
+            return Result(new ResolveOutcome.FallBackUpward(FallBackReason.AmbiguousList));
 
         return Result(
             new ResolveOutcome.Error("找到多個專案，請用 --project 指定，或用 --set-default 設定預設專案", discovered)

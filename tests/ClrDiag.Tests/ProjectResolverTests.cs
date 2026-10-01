@@ -33,7 +33,7 @@ public sealed class ProjectResolverTests : IDisposable
         string? project = null,
         bool pick = false,
         bool interactive = true,
-        bool ambiguousFallsBackUpward = false
+        AmbiguityPolicy ambiguity = AmbiguityPolicy.Error
     ) =>
         ProjectResolver.Resolve(
             discovered,
@@ -41,15 +41,16 @@ public sealed class ProjectResolverTests : IDisposable
             project,
             pick,
             interactive,
-            ambiguousFallsBackUpward
+            ambiguity
         );
 
     [Fact]
     public void 允許往上搜尋時非互動模式多個專案沒有記錄改走往上搜尋()
     {
-        var result = Resolve(All, interactive: false, ambiguousFallsBackUpward: true);
+        var result = Resolve(All, interactive: false, ambiguity: AmbiguityPolicy.FallBackUpward);
 
-        Assert.IsType<ResolveOutcome.FallBackUpward>(result.Outcome);
+        var fallBack = Assert.IsType<ResolveOutcome.FallBackUpward>(result.Outcome);
+        Assert.Equal(FallBackReason.AmbiguousList, fallBack.Reason);
     }
 
     [Fact]
@@ -59,17 +60,18 @@ public sealed class ProjectResolverTests : IDisposable
             All,
             new ProjectState { LastRun = Missing },
             interactive: false,
-            ambiguousFallsBackUpward: true
+            ambiguity: AmbiguityPolicy.FallBackUpward
         );
 
-        Assert.IsType<ResolveOutcome.FallBackUpward>(result.Outcome);
+        var fallBack = Assert.IsType<ResolveOutcome.FallBackUpward>(result.Outcome);
+        Assert.Equal(FallBackReason.AmbiguousList, fallBack.Reason);
         Assert.True(result.StaleLastRun);
     }
 
     [Fact]
     public void 允許往上搜尋時指定專案沒有符合仍回報錯誤()
     {
-        var result = Resolve(All, project: "Nope", interactive: false, ambiguousFallsBackUpward: true);
+        var result = Resolve(All, project: "Nope", interactive: false, ambiguity: AmbiguityPolicy.FallBackUpward);
 
         Assert.IsType<ResolveOutcome.Error>(result.Outcome);
     }
@@ -85,7 +87,7 @@ public sealed class ProjectResolverTests : IDisposable
             LastRun = useLastRun ? _web.FullPath : null,
         };
 
-        var result = Resolve(All, saved, interactive: false, ambiguousFallsBackUpward: true);
+        var result = Resolve(All, saved, interactive: false, ambiguity: AmbiguityPolicy.FallBackUpward);
 
         var use = Assert.IsType<ResolveOutcome.Use>(result.Outcome);
         Assert.Equal(useDefault ? _b : _web, use.Project);
@@ -95,7 +97,7 @@ public sealed class ProjectResolverTests : IDisposable
     [Fact]
     public void 允許往上搜尋時只有一個專案仍直接使用()
     {
-        var result = Resolve(new[] { _a }, interactive: false, ambiguousFallsBackUpward: true);
+        var result = Resolve(new[] { _a }, interactive: false, ambiguity: AmbiguityPolicy.FallBackUpward);
 
         var use = Assert.IsType<ResolveOutcome.Use>(result.Outcome);
         Assert.Equal(ProjectSource.Single, use.Source);
@@ -106,7 +108,8 @@ public sealed class ProjectResolverTests : IDisposable
     {
         var result = Resolve(Array.Empty<DiscoveredProject>(), new ProjectState { Default = Missing });
 
-        Assert.IsType<ResolveOutcome.FallBackUpward>(result.Outcome);
+        var fallBack = Assert.IsType<ResolveOutcome.FallBackUpward>(result.Outcome);
+        Assert.Equal(FallBackReason.NoProjects, fallBack.Reason);
         Assert.True(result.StaleDefault);
     }
 

@@ -107,10 +107,6 @@ public sealed class ProjectStateStore
             ? state
             : ProjectState.Empty;
 
-    /// <summary>設定預設專案。回傳是否成功寫入。</summary>
-    public bool SetDefault(string workingDir, string projectPath) =>
-        SetDefault(workingDir, projectPath, clearLastRun: false);
-
     /// <summary>清除預設專案。回傳是否成功寫入。</summary>
     public bool ClearDefault(string workingDir) => Update(workingDir, s => s with { Default = null });
 
@@ -137,10 +133,10 @@ public sealed class ProjectStateStore
     }
 
     /// <summary>
-    /// 在同一次「讀取 → 修改 → 寫回」中設定預設專案，clearLastRun 為 true 時一併清除上次執行記錄；
-    /// 用於選單設為預設時同時移除已不存在的記錄。回傳是否成功寫入。
+    /// 在同一次「讀取 → 修改 → 寫回」中設定預設專案，clearLastRun 為 true 時一併清除上次執行記錄
+    /// （選單設為預設時同時移除已不存在的記錄）。回傳是否成功寫入。
     /// </summary>
-    public bool SetDefault(string workingDir, string projectPath, bool clearLastRun) =>
+    public bool SetDefault(string workingDir, string projectPath, bool clearLastRun = false) =>
         Update(
             workingDir,
             s => s with { Default = Path.GetFullPath(projectPath), LastRun = clearLastRun ? null : s.LastRun }

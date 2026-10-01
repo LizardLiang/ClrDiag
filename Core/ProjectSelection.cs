@@ -84,11 +84,29 @@ public static class ProjectSelection
         "找到多個專案，--list 改用往上搜尋得到的專案根目錄設定；可用 --project 指定專案";
 
     /// <summary>
+    /// --list 改走往上搜尋時的提示。記錄的預設或上次執行專案已不存在時，在 AmbiguousListNotice 後面說明哪些記錄失效；
+    /// 批次模式不寫入狀態檔，因此一併提示可用 --set-default 重新設定預設專案。
+    /// </summary>
+    public static string AmbiguousListNoticeFor(bool staleDefault, bool staleLastRun)
+    {
+        string? stale = (staleDefault, staleLastRun) switch
+        {
+            (true, true) => "預設與上次執行專案",
+            (true, false) => "預設專案",
+            (false, true) => "上次執行專案",
+            _ => null,
+        };
+        return stale is null
+            ? AmbiguousListNotice
+            : $"{AmbiguousListNotice}；記錄的{stale}已不存在，可用 --set-default 重新設定預設專案";
+    }
+
+    /// <summary>
     /// 掃描工作目錄並決定要用的專案。必要時呼叫 prompt 顯示選單，prompt 回傳 null 代表使用者取消。
     /// interactive 且選定了專案時，才移除已失效的記錄並在使用者同意時寫入預設專案；
     /// 取消、錯誤與批次模式不寫入狀態檔。
-    /// ambiguousFallsBackUpward 為 true（--list）時，批次模式遇到多個專案且沒有記錄不回報錯誤，
-    /// 改走往上搜尋專案根目錄並提示 AmbiguousListNotice。
+    /// ambiguity 為 AmbiguityPolicy.FallBackUpward（--list）時，批次模式遇到多個專案且沒有記錄不回報錯誤，
+    /// 改走往上搜尋專案根目錄並提示 AmbiguousListNoticeFor 的文字；工作目錄底下沒有專案時不提示。
     /// 掃描達到上限、記錄寫入失敗、使用者取消等非致命訊息交給 notice 輸出。
     /// </summary>
     public static ProjectSelectionResult Resolve(
@@ -99,7 +117,7 @@ public static class ProjectSelection
         bool interactive,
         Func<IReadOnlyList<DiscoveredProject>, DiscoveredProject?, ProjectState, ProjectPick?> prompt,
         Action<string> notice,
-        bool ambiguousFallsBackUpward = false
+        AmbiguityPolicy ambiguity = AmbiguityPolicy.Error
     )
     {
         ScanResult scan = ProjectDiscovery.Scan(workingDir);
@@ -116,7 +134,7 @@ public static class ProjectSelection
             projectQuery,
             pick,
             interactive,
-            ambiguousFallsBackUpward
+            ambiguity
         );
 
         switch (resolution.Outcome)
@@ -136,10 +154,13 @@ public static class ProjectSelection
                     new ProjectMiss(error.Message, error.Candidates)
                 );
 
-            default:
-                if (discovered.Count > 0)
-                    notice(AmbiguousListNotice);
+            case ResolveOutcome.FallBackUpward fallBack:
+                if (fallBack.Reason == FallBackReason.AmbiguousList)
+                    notice(AmbiguousListNoticeFor(resolution.StaleDefault, resolution.StaleLastRun));
                 return new ProjectSelectionResult(null, null, null, null);
+
+            default:
+                throw new InvalidOperationException($"未處理的解析結果: {resolution.Outcome}");
         }
     }
 
@@ -171,7 +192,7 @@ public static class ProjectSelection
             return new ProjectSelectionResult(picked.Project, "選單", null, null);
         }
 
-        if (store.SetDefault(workingDir, picked.Project.FullPath, resolution.StaleLastRun))
+        if (store.SetDefault(workingDir, picked.Project.FullPath, clearLastRun: resolution.StaleLastRun))
             return new ProjectSelectionResult(picked.Project, "選單，已設為預設", null, null);
 
         notice(store.WriteFailureMessage);

@@ -69,6 +69,8 @@ When none of these decides, the tool prints the candidates and exits with code 2
 Pass `--project` in that case.
 `--list` is the exception: it searches upward for `clrdiag.json` instead,
 lists processes as usual, and prints a "multiple projects" notice to stderr.
+The notice also names a saved default or last-run project that no longer exists.
+`--list` does not change the saved records.
 A blank `--project` value, or a name that matches
 nothing, also exits with code 2, with `--list` too. This holds when the scan finds no project too.
 When the scan finds nothing and no `--project` is given, the tool searches
@@ -82,6 +84,8 @@ its subfolders, which carry a reparse point but are not links. It skips folders
 whose link target it cannot read, and prints how many it skipped.
 It stops after 20,000 folders, or after 10 seconds, and prints a notice.
 A slow network drive or OneDrive cloud-only folders can use up the 10 seconds.
+The tool checks the time limit between folders. A single folder read that hangs
+can make the scan take longer than 10 seconds.
 Pass `--project` or `--root` when you see that notice.
 In batch commands, warnings and notices go to stderr as plain text.
 Stdout holds only the command result, so `--pipe-name` prints only the pipe name.
@@ -94,6 +98,7 @@ Stdout and stderr are UTF-8 without a BOM for every non-interactive flag:
 `--snapshot`, `--threads`, `--roots`, `--render`, `--output`, `--dap`, `--list`,
 `--init`, `--build`, `--export`, `--send`, `--pipe-name`, `--install-skill`,
 `--projects`, `--set-default`, `--clear-default`. Argument errors are UTF-8 too.
+`--help` writes UTF-8 when stdout is redirected, for example `clrdiag --help > help.txt`.
 Run `clrdiag --projects` to see the projects found, with the default (`★ 預設`)
 and last-run (`◎ 上次`) markers.
 

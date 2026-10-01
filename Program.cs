@@ -141,6 +141,12 @@ for (int i = 0; i < args.Length; i++)
             break;
         case "--help":
         case "-h":
+            // 印到終端機時沿用主控台字碼頁；標準輸出重新導向到檔案或管線時與參數錯誤一樣改用 UTF-8
+            if (Console.IsOutputRedirected)
+            {
+                UseUtf8Output();
+            }
+
             PrintHelp(Console.Out);
             return 0;
         default:
@@ -242,7 +248,7 @@ if (!explicitRoot && usesDiscovery)
         interactive,
         ProjectPicker.Pick,
         notices.Write,
-        ambiguousFallsBackUpward: listMode
+        listMode ? AmbiguityPolicy.FallBackUpward : AmbiguityPolicy.Error
     );
 
     if (selection.Error is { } miss)
@@ -518,9 +524,19 @@ static int ArgumentError(string markup, Action<TextWriter>? usage)
     return 2;
 }
 
-/// <summary>標準輸出與標準錯誤改用不含 BOM 的 UTF-8；Console 會依新的編碼重建兩個串流。</summary>
-static void UseUtf8Output() =>
-    Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+/// <summary>
+/// 標準輸出與標準錯誤改用不含 BOM 的 UTF-8；Console 會依新的編碼重建兩個串流。
+/// 沒有附加主控台等情況下設定會擲出例外，這時沿用原本的編碼繼續執行。
+/// </summary>
+static void UseUtf8Output()
+{
+    try
+    {
+        Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+    }
+    catch (Exception ex) when (ex is IOException or PlatformNotSupportedException or System.Security.SecurityException)
+    { }
+}
 
 /// <summary>
 /// 寫到標準錯誤的 Spectre 主控台：專案比對失敗與專案管理指令的錯誤訊息寫在這裡，標準輸出只留給結果。
