@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -16,15 +18,34 @@ public sealed record ProjectState
     /// <summary>上次在互動模式執行的專案完整路徑。</summary>
     [JsonPropertyName("lastRun")]
     public string? LastRun { get; init; }
+
+    /// <summary>
+    /// 這筆記錄最後一次變更的時間，清理記錄時保留最近變更的工作目錄。
+    /// 沒有這個欄位的記錄（例如較早版本寫入的檔案）視為最舊。
+    /// </summary>
+    [JsonPropertyName("updated")]
+    public DateTimeOffset? Updated { get; init; }
 }
 
 /// <summary>
 /// 讀寫 %LOCALAPPDATA%\clrdiag\projects.json，以工作目錄（不分大小寫）為鍵保存 ProjectState。
-/// 檔案不存在、無法讀取或 JSON 損毀時一律視為空狀態；寫入先寫暫存檔再取代，
-/// 中途中斷也不會留下半份檔案。
+/// 讀取時檔案不存在、無法讀取或 JSON 損毀都視為空狀態。
+/// 寫入是「讀取 → 修改 → 寫回」，以具名 Mutex 串接同一個檔案的所有 clrdiag 行程：
+/// 檔案存在但讀不到時不寫入，避免蓋掉其他工作目錄的記錄；JSON 損毀時先改名為 projects.json.bak 再寫入新檔。
+/// 寫入先寫暫存檔再取代，中途中斷也不會留下半份檔案；每次寫入順便清理已失效的工作目錄、
+/// 超過上限的舊記錄，以及先前中斷留下的暫存檔。
 /// </summary>
 public sealed class ProjectStateStore
 {
+    /// <summary>保存的工作目錄數上限，超過時保留最近變更的記錄。</summary>
+    public const int DefaultMaxEntries = 100;
+
+    /// <summary>等待其他 clrdiag 行程釋放檔案鎖的時間上限。</summary>
+    public static readonly TimeSpan DefaultLockTimeout = TimeSpan.FromSeconds(2);
+
+    /// <summary>暫存檔超過這個時間沒有更新，就視為先前中斷留下的檔案。</summary>
+    private static readonly TimeSpan StaleTempAge = TimeSpan.FromMinutes(5);
+
     /// <summary>正式使用的狀態檔位置。</summary>
     public static string DefaultPath =>
         Path.Combine(
@@ -40,16 +61,43 @@ public sealed class ProjectStateStore
     };
 
     private readonly string _filePath;
+    private readonly int _maxEntries;
+    private readonly TimeSpan _lockTimeout;
+    private readonly Func<DateTimeOffset> _clock;
 
-    /// <summary>filePath 指定狀態檔位置，測試可指向暫存資料夾。</summary>
-    public ProjectStateStore(string filePath)
+    /// <summary>
+    /// filePath 指定狀態檔位置，測試可指向暫存資料夾；maxEntries 是保存的工作目錄數上限；
+    /// lockTimeout 是等待檔案鎖的時間上限；clock 提供記錄的變更時間。
+    /// </summary>
+    public ProjectStateStore(
+        string filePath,
+        int maxEntries = DefaultMaxEntries,
+        TimeSpan? lockTimeout = null,
+        Func<DateTimeOffset>? clock = null
+    )
     {
-        _filePath = filePath;
+        _filePath = Path.GetFullPath(filePath);
+        _maxEntries = maxEntries;
+        _lockTimeout = lockTimeout ?? DefaultLockTimeout;
+        _clock = clock ?? (() => DateTimeOffset.UtcNow);
+    }
+
+    /// <summary>狀態檔的完整路徑。</summary>
+    public string FilePath => _filePath;
+
+    /// <summary>寫入失敗時給使用者看的訊息。</summary>
+    public string WriteFailureMessage => $"無法寫入專案記錄: {_filePath}";
+
+    /// <summary>串接同一個狀態檔讀寫的具名 Mutex 名稱，由檔案完整路徑（不分大小寫）衍生。</summary>
+    public static string MutexNameFor(string filePath)
+    {
+        byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(filePath).ToLowerInvariant()));
+        return $@"Local\clrdiag-projects-{Convert.ToHexString(hash)[..16]}";
     }
 
     /// <summary>取得工作目錄的記錄；沒有記錄或檔案無法讀取時回傳 ProjectState.Empty。</summary>
     public ProjectState Get(string workingDir) =>
-        ReadAll().TryGetValue(NormalizeKey(workingDir), out var state) && state is not null
+        ReadAll().Entries.TryGetValue(NormalizeKey(workingDir), out var state) && state is not null
             ? state
             : ProjectState.Empty;
 
@@ -60,7 +108,7 @@ public sealed class ProjectStateStore
     /// <summary>清除預設專案。回傳是否成功寫入。</summary>
     public bool ClearDefault(string workingDir) => Update(workingDir, s => s with { Default = null });
 
-    /// <summary>記錄上次執行的專案。回傳是否成功寫入。</summary>
+    /// <summary>記錄上次執行的專案；與現有記錄相同時不寫檔。回傳是否成功寫入。</summary>
     public bool SetLastRun(string workingDir, string projectPath) =>
         Update(workingDir, s => s with { LastRun = Path.GetFullPath(projectPath) });
 
@@ -71,38 +119,113 @@ public sealed class ProjectStateStore
     public static string NormalizeKey(string workingDir) =>
         Path.GetFullPath(workingDir).TrimEnd('\\', '/').ToLowerInvariant();
 
+    /// <summary>讀取狀態檔的結果分類；Update 依此決定能不能寫回。</summary>
+    private enum ReadStatus
+    {
+        Missing,
+        Loaded,
+        Unreadable,
+        Corrupt,
+    }
+
     private bool Update(string workingDir, Func<ProjectState, ProjectState> change)
     {
-        var all = ReadAll();
+        using FileLock? fileLock = FileLock.Acquire(MutexNameFor(_filePath), _lockTimeout);
+        if (fileLock is null)
+            return false;
+
+        var (status, all) = ReadAll();
+        if (status == ReadStatus.Unreadable)
+            return false;
+
         var key = NormalizeKey(workingDir);
         var current = all.TryGetValue(key, out var existing) && existing is not null ? existing : ProjectState.Empty;
         var updated = change(current);
 
+        if (status != ReadStatus.Corrupt && SameProjects(current, updated))
+            return true;
+
+        if (status == ReadStatus.Corrupt && !BackUpCorruptFile())
+            return false;
+
         if (updated.Default is null && updated.LastRun is null)
             all.Remove(key);
         else
-            all[key] = updated;
+            all[key] = updated with { Updated = _clock() };
 
+        Prune(all, key);
         return WriteAll(all);
     }
 
-    private Dictionary<string, ProjectState?> ReadAll()
+    private static bool SameProjects(ProjectState a, ProjectState b) =>
+        string.Equals(a.Default, b.Default, StringComparison.Ordinal)
+        && string.Equals(a.LastRun, b.LastRun, StringComparison.Ordinal);
+
+    private (ReadStatus Status, Dictionary<string, ProjectState?> Entries) ReadAll()
+    {
+        if (!File.Exists(_filePath))
+            return (ReadStatus.Missing, new Dictionary<string, ProjectState?>());
+
+        string json;
+        try
+        {
+            json = File.ReadAllText(_filePath);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return (ReadStatus.Unreadable, new Dictionary<string, ProjectState?>());
+        }
+
+        try
+        {
+            var parsed = JsonSerializer.Deserialize<Dictionary<string, ProjectState?>>(json, JsonOptions);
+            return parsed is null
+                ? (ReadStatus.Loaded, new Dictionary<string, ProjectState?>())
+                : (ReadStatus.Loaded, new Dictionary<string, ProjectState?>(parsed, StringComparer.Ordinal));
+        }
+        catch (JsonException)
+        {
+            return (ReadStatus.Corrupt, new Dictionary<string, ProjectState?>());
+        }
+    }
+
+    /// <summary>把損毀的狀態檔改名為 .bak 保留原始內容；改名失敗時回傳 false。</summary>
+    private bool BackUpCorruptFile()
     {
         try
         {
-            if (!File.Exists(_filePath))
-                return new Dictionary<string, ProjectState?>();
-
-            var json = File.ReadAllText(_filePath);
-            var parsed = JsonSerializer.Deserialize<Dictionary<string, ProjectState?>>(json, JsonOptions);
-            return parsed is null
-                ? new Dictionary<string, ProjectState?>()
-                : new Dictionary<string, ProjectState?>(parsed, StringComparer.Ordinal);
+            File.Move(_filePath, _filePath + ".bak", overwrite: true);
+            return true;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return new Dictionary<string, ProjectState?>();
+            return false;
         }
+    }
+
+    /// <summary>
+    /// 移除工作目錄已不存在的記錄（目前寫入的工作目錄除外），
+    /// 數量仍超過上限時保留目前的工作目錄與最近變更的記錄。
+    /// </summary>
+    private void Prune(Dictionary<string, ProjectState?> all, string currentKey)
+    {
+        foreach (var key in all.Keys.ToList())
+        {
+            if (key != currentKey && (all[key] is null || !Directory.Exists(key)))
+                all.Remove(key);
+        }
+
+        if (all.Count <= _maxEntries)
+            return;
+
+        var keep = all.OrderByDescending(entry => entry.Key == currentKey)
+            .ThenByDescending(entry => entry.Value?.Updated ?? DateTimeOffset.MinValue)
+            .Take(_maxEntries)
+            .Select(entry => entry.Key)
+            .ToHashSet(StringComparer.Ordinal);
+
+        foreach (var key in all.Keys.Where(key => !keep.Contains(key)).ToList())
+            all.Remove(key);
     }
 
     private bool WriteAll(Dictionary<string, ProjectState?> all)
@@ -112,7 +235,10 @@ public sealed class ProjectStateStore
         {
             var folder = Path.GetDirectoryName(_filePath);
             if (!string.IsNullOrEmpty(folder))
+            {
                 Directory.CreateDirectory(folder);
+                RemoveStaleTempFiles(folder);
+            }
 
             File.WriteAllText(tempPath, JsonSerializer.Serialize(all, JsonOptions));
             File.Move(tempPath, _filePath, overwrite: true);
@@ -126,6 +252,62 @@ public sealed class ProjectStateStore
             }
             catch (Exception cleanupEx) when (cleanupEx is IOException or UnauthorizedAccessException) { }
             return false;
+        }
+    }
+
+    /// <summary>刪除先前寫入中斷留下、超過 StaleTempAge 沒有更新的暫存檔；刪不掉的留到下次。</summary>
+    private void RemoveStaleTempFiles(string folder)
+    {
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(folder, Path.GetFileName(_filePath) + ".*.tmp"))
+            {
+                try
+                {
+                    if (DateTime.UtcNow - File.GetLastWriteTimeUtc(file) > StaleTempAge)
+                        File.Delete(file);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+    }
+
+    /// <summary>持有狀態檔的具名 Mutex；Dispose 時釋放。</summary>
+    private sealed class FileLock : IDisposable
+    {
+        private readonly Mutex _mutex;
+
+        private FileLock(Mutex mutex)
+        {
+            _mutex = mutex;
+        }
+
+        /// <summary>在 timeout 內取得鎖；逾時回傳 null。前一個持有者異常結束時視為取得。</summary>
+        public static FileLock? Acquire(string name, TimeSpan timeout)
+        {
+            var mutex = new Mutex(initiallyOwned: false, name);
+            bool acquired;
+            try
+            {
+                acquired = mutex.WaitOne(timeout);
+            }
+            catch (AbandonedMutexException)
+            {
+                acquired = true;
+            }
+
+            if (acquired)
+                return new FileLock(mutex);
+
+            mutex.Dispose();
+            return null;
+        }
+
+        public void Dispose()
+        {
+            _mutex.ReleaseMutex();
+            _mutex.Dispose();
         }
     }
 }

@@ -15,7 +15,7 @@ public sealed class ProjectResolverTests : IDisposable
         _tree.File("A/A.csproj");
         _tree.File("B/B.sln");
         _tree.File("B/Web/Web.csproj");
-        var all = ProjectDiscovery.Scan(_tree.Root);
+        var all = ProjectDiscovery.Scan(_tree.Root).Projects;
         _a = all[0];
         _b = all[1];
         _web = all[2];
@@ -42,6 +42,28 @@ public sealed class ProjectResolverTests : IDisposable
 
         Assert.IsType<ResolveOutcome.FallBackUpward>(result.Outcome);
         Assert.True(result.StaleDefault);
+    }
+
+    [Fact]
+    public void 指定專案但沒有任何專案時回報錯誤而不是往上搜尋()
+    {
+        var result = Resolve(Array.Empty<DiscoveredProject>(), project: "Api", interactive: false);
+
+        var error = Assert.IsType<ResolveOutcome.Error>(result.Outcome);
+        Assert.Equal("找不到符合「Api」的專案", error.Message);
+        Assert.Empty(error.Candidates);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("  ")]
+    public void 指定空白專案名稱時回報錯誤(string project)
+    {
+        var result = Resolve(All, new ProjectState { Default = _a.FullPath }, project: project);
+
+        var error = Assert.IsType<ResolveOutcome.Error>(result.Outcome);
+        Assert.Equal("專案名稱不能空白", error.Message);
+        Assert.Equal(All, error.Candidates);
     }
 
     [Fact]

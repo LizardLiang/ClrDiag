@@ -22,7 +22,7 @@ public sealed class ProjectDiscoveryTests : IDisposable
         _tree.File("E/E.fsproj");
         _tree.File("E/readme.md");
 
-        var result = ProjectDiscovery.Scan(_tree.Root);
+        var result = ProjectDiscovery.Scan(_tree.Root).Projects;
 
         Assert.Equal(new[] { "A/A.csproj", "B/B.sln", "C/C.slnx", "D/D.vbproj" }, Paths(result));
     }
@@ -39,7 +39,7 @@ public sealed class ProjectDiscoveryTests : IDisposable
         _tree.File(".vs/V.csproj");
         _tree.File(".hidden/H.csproj");
 
-        var result = ProjectDiscovery.Scan(_tree.Root);
+        var result = ProjectDiscovery.Scan(_tree.Root).Projects;
 
         Assert.Equal(new[] { "App/App.csproj" }, Paths(result));
     }
@@ -51,7 +51,7 @@ public sealed class ProjectDiscoveryTests : IDisposable
         _tree.File("1/2/Two.csproj");
         _tree.File("1/2/3/Three.csproj");
 
-        var result = ProjectDiscovery.Scan(_tree.Root, maxDepth: 2);
+        var result = ProjectDiscovery.Scan(_tree.Root, maxDepth: 2).Projects;
 
         Assert.Equal(new[] { "1/2/Two.csproj", "Root.sln" }, Paths(result));
     }
@@ -63,7 +63,7 @@ public sealed class ProjectDiscoveryTests : IDisposable
         _tree.File("A/A.csproj");
         _tree.File("B.sln");
 
-        var result = ProjectDiscovery.Scan(_tree.Root);
+        var result = ProjectDiscovery.Scan(_tree.Root).Projects;
 
         Assert.Equal(new[] { "A/A.csproj", "B.sln", "b/Web/Web.csproj" }, Paths(result));
         var webEntry = result[2];
@@ -129,5 +129,100 @@ public sealed class ProjectDiscoveryTests : IDisposable
 
         Assert.Null(result.Hit);
         Assert.Empty(result.Candidates);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void Match_空白名稱不符合任何專案(string query)
+    {
+        var result = ProjectDiscovery.Match(Sample, query);
+
+        Assert.Null(result.Hit);
+        Assert.Empty(result.Candidates);
+    }
+
+    [Fact]
+    public void DescribeMiss_符合多筆時只列出候選()
+    {
+        var miss = ProjectDiscovery.DescribeMiss("Web", ProjectDiscovery.Match(Sample, "Web"), Sample);
+
+        Assert.Equal("「Web」符合多個專案，請指定更完整的路徑", miss.Message);
+        Assert.Equal(new[] { "B/Web/Web.csproj", "C/Web/Web.csproj" }, Paths(miss.Candidates));
+    }
+
+    [Fact]
+    public void DescribeMiss_沒有符合時列出所有專案()
+    {
+        var miss = ProjectDiscovery.DescribeMiss("nothing", ProjectDiscovery.Match(Sample, "nothing"), Sample);
+
+        Assert.Equal("找不到符合「nothing」的專案", miss.Message);
+        Assert.Equal(Sample, miss.Candidates);
+    }
+
+    [Fact]
+    public void DescribeMiss_沒有任何專案時候選清單為空()
+    {
+        var none = Array.Empty<DiscoveredProject>();
+
+        var miss = ProjectDiscovery.DescribeMiss("Api", ProjectDiscovery.Match(none, "Api"), none);
+
+        Assert.Equal("找不到符合「Api」的專案", miss.Message);
+        Assert.Empty(miss.Candidates);
+    }
+
+    [Fact]
+    public void DescribeMiss_空白名稱說明名稱不能空白並列出所有專案()
+    {
+        var miss = ProjectDiscovery.DescribeMiss(" ", ProjectDiscovery.Match(Sample, " "), Sample);
+
+        Assert.Equal("專案名稱不能空白", miss.Message);
+        Assert.Equal(Sample, miss.Candidates);
+    }
+
+    [Fact]
+    public void Scan_達到資料夾上限時回傳已找到的專案並標記截斷()
+    {
+        _tree.File("Root.sln");
+        _tree.File("1/One.csproj");
+        _tree.File("2/Two.csproj");
+
+        var limited = ProjectDiscovery.Scan(_tree.Root, maxFolders: 1);
+        var full = ProjectDiscovery.Scan(_tree.Root);
+
+        Assert.True(limited.Truncated);
+        Assert.Equal(new[] { "Root.sln" }, Paths(limited.Projects));
+        Assert.False(full.Truncated);
+        Assert.Equal(3, full.Projects.Count);
+    }
+
+    [Fact]
+    public void IncludeSaved_補上掃描範圍外仍存在且位於工作目錄內的記錄()
+    {
+        _tree.File("Root.sln");
+        var deep = _tree.File("1/2/Deep.csproj");
+        var outside = Path.Combine(Path.GetTempPath(), "clrdiag-tests", $"{Guid.NewGuid():N}.csproj");
+        File.WriteAllText(outside, "");
+        try
+        {
+            var limited = ProjectDiscovery.Scan(_tree.Root, maxFolders: 1);
+            var saved = new ProjectState { Default = deep, LastRun = outside };
+
+            var merged = ProjectDiscovery.IncludeSaved(limited.Projects, _tree.Root, saved);
+
+            Assert.Equal(new[] { "1/2/Deep.csproj", "Root.sln" }, Paths(merged));
+            Assert.Equal("Deep", merged[0].Name);
+        }
+        finally
+        {
+            File.Delete(outside);
+        }
+    }
+
+    [Fact]
+    public void ExtensionList_與DiagConfig共用同一份副檔名()
+    {
+        Assert.Equal(".sln / .slnx / .csproj / .vbproj", ProjectDiscovery.ExtensionList);
+        Assert.Equal(new[] { ".sln", ".slnx", ".csproj", ".vbproj" }, DiagConfig.ProjectExtensions);
     }
 }

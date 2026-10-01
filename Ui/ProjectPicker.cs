@@ -3,12 +3,10 @@ using Spectre.Console;
 
 namespace ClrDiag.Ui;
 
-/// <summary>使用者在選單中挑選專案的結果；SetAsDefault 表示使用者同意把它設為預設專案。</summary>
-public sealed record ProjectPick(DiscoveredProject Project, bool SetAsDefault);
-
 /// <summary>
-/// 啟動前的專案選單：可輸入名稱篩選，上次執行的專案排在第一個。
+/// 啟動前的專案選單：可輸入名稱篩選，上次執行的專案排在第一個，最後一項是「取消」。
 /// 選單在切換替代畫面與啟動任何子行程之前執行，子行程不會搶走選單的鍵盤輸入。
+/// 標記文字只用 Big5（cp950）主控台也能顯示的字元。
 /// </summary>
 public static class ProjectPicker
 {
@@ -16,25 +14,42 @@ public static class ProjectPicker
     public const string DefaultMarker = "★ 預設";
 
     /// <summary>上次執行專案的標記。</summary>
-    public const string LastRunMarker = "↺ 上次";
+    public const string LastRunMarker = "◎ 上次";
 
-    /// <summary>顯示選單並詢問是否設為預設；preselect 是上次執行的專案，會排在第一個。</summary>
-    public static ProjectPick Pick(
+    /// <summary>選單最後一項的文字；選它代表不啟動並結束。</summary>
+    public const string CancelLabel = "取消";
+
+    /// <summary>代表「取消」的選項，以參考比較與真正的專案區分。</summary>
+    private static readonly DiscoveredProject CancelChoice = new(string.Empty, string.Empty, string.Empty);
+
+    /// <summary>
+    /// 顯示選單並詢問是否設為預設；preselect 是上次執行的專案，會排在第一個。
+    /// 使用者選「取消」時回傳 null，不再詢問是否設為預設。
+    /// </summary>
+    public static ProjectPick? Pick(
         IReadOnlyList<DiscoveredProject> projects,
         DiscoveredProject? preselect,
         ProjectState saved
     )
     {
         var prompt = new SelectionPrompt<DiscoveredProject>()
-            .Title("選擇要執行的專案（↑↓ 移動、Enter 確認）")
+            .Title("選擇要執行的專案（↑↓ 移動、Enter 確認，選「取消」離開）")
             .PageSize(15)
             .EnableSearch()
             .SearchPlaceholderText("輸入名稱篩選…")
             .MoreChoicesText("[grey]（還有更多專案，往下捲動查看）[/]")
-            .UseConverter(project => LabelMarkup(project, saved))
-            .AddChoices(OrderChoices(projects, preselect));
+            .UseConverter(project =>
+                ReferenceEquals(project, CancelChoice) ? $"[grey]{CancelLabel}[/]" : LabelMarkup(project, saved)
+            )
+            .AddChoices(OrderChoices(projects, preselect))
+            .AddChoices(CancelChoice);
 
         DiscoveredProject picked = AnsiConsole.Prompt(prompt);
+        if (ReferenceEquals(picked, CancelChoice))
+        {
+            return null;
+        }
+
         bool setDefault = AnsiConsole.Confirm("設為預設？", defaultValue: false);
         return new ProjectPick(picked, setDefault);
     }

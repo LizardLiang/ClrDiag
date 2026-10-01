@@ -40,14 +40,15 @@ public abstract record ResolveOutcome
 public sealed record ProjectResolution(ResolveOutcome Outcome, bool StaleDefault, bool StaleLastRun);
 
 /// <summary>
-/// 依「--project → --pick → 預設專案 → 唯一專案 → 選單／上次執行」的順序決定要用哪個專案。
+/// 依「--project → 沒有任何專案時往上搜尋 → --pick → 預設專案 → 唯一專案 → 選單／上次執行」的順序決定要用哪個專案。
 /// 純邏輯，不做任何主控台輸出；非互動模式永遠不回傳 Prompt。
 /// </summary>
 public static class ProjectResolver
 {
     /// <summary>
-    /// 解析要使用的專案。projectQuery 是 --project 的值；pick 對應 --pick，只在互動模式生效；
-    /// interactive 表示可以顯示選單（沒有批次旗標且主控台未被重新導向）。
+    /// 解析要使用的專案。projectQuery 是 --project 的值，不為 null 就代表有指定：
+    /// 空白或沒有唯一符合（包括工作目錄底下沒有任何專案）時回傳 Error。
+    /// pick 對應 --pick，只在互動模式生效；interactive 表示可以顯示選單。
     /// </summary>
     public static ProjectResolution Resolve(
         IReadOnlyList<DiscoveredProject> discovered,
@@ -62,19 +63,18 @@ public static class ProjectResolver
 
         ProjectResolution Result(ResolveOutcome outcome) => new(outcome, staleDefault, staleLastRun);
 
-        if (discovered.Count == 0)
-            return Result(new ResolveOutcome.FallBackUpward());
-
-        if (!string.IsNullOrWhiteSpace(projectQuery))
+        if (projectQuery is not null)
         {
             var match = ProjectDiscovery.Match(discovered, projectQuery);
             if (match.Hit is not null)
                 return Result(new ResolveOutcome.Use(match.Hit, ProjectSource.Explicit));
 
-            return match.Candidates.Count > 1
-                ? Result(new ResolveOutcome.Error($"「{projectQuery}」符合多個專案，請指定更完整的路徑", match.Candidates))
-                : Result(new ResolveOutcome.Error($"找不到符合「{projectQuery}」的專案", discovered));
+            var miss = ProjectDiscovery.DescribeMiss(projectQuery, match, discovered);
+            return Result(new ResolveOutcome.Error(miss.Message, miss.Candidates));
         }
+
+        if (discovered.Count == 0)
+            return Result(new ResolveOutcome.FallBackUpward());
 
         if (interactive && pick)
             return Result(new ResolveOutcome.Prompt(discovered, lastRunProject));

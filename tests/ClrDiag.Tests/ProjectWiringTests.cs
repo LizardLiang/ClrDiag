@@ -1,3 +1,4 @@
+using System.Text;
 using ClrDiag.Core;
 using ClrDiag.Ui;
 
@@ -25,7 +26,7 @@ public sealed class ProjectWiringTests : IDisposable
         _tree.File("A/A.csproj");
         _tree.File("B/B.sln");
         _tree.File("B/Web/Web.csproj");
-        var all = ProjectDiscovery.Scan(_tree.Root);
+        var all = ProjectDiscovery.Scan(_tree.Root).Projects;
 
         var ordered = ProjectPicker.OrderChoices(all, all[2]);
 
@@ -37,7 +38,7 @@ public sealed class ProjectWiringTests : IDisposable
     {
         _tree.File("A/A.csproj");
         _tree.File("B/B.sln");
-        var all = ProjectDiscovery.Scan(_tree.Root);
+        var all = ProjectDiscovery.Scan(_tree.Root).Projects;
 
         Assert.Equal(all, ProjectPicker.OrderChoices(all, null));
     }
@@ -46,11 +47,46 @@ public sealed class ProjectWiringTests : IDisposable
     public void 標記同時標出預設與上次執行並且不分大小寫()
     {
         var path = _tree.File("A/A.csproj");
-        var project = ProjectDiscovery.Scan(_tree.Root)[0];
+        var project = ProjectDiscovery.Scan(_tree.Root).Projects[0];
         var saved = new ProjectState { Default = path.ToUpperInvariant(), LastRun = path };
 
         Assert.Equal($"{ProjectPicker.DefaultMarker} {ProjectPicker.LastRunMarker}", ProjectPicker.Markers(project, saved));
         Assert.Equal(string.Empty, ProjectPicker.Markers(project, ProjectState.Empty));
+    }
+
+    [Fact]
+    public void 標記與取消文字可以用Big5主控台顯示()
+    {
+        var big5 = (Encoding)CodePagesEncodingProvider.Instance.GetEncoding(950)!.Clone();
+        big5.EncoderFallback = EncoderFallback.ExceptionFallback;
+
+        foreach (var text in new[] { ProjectPicker.DefaultMarker, ProjectPicker.LastRunMarker, ProjectPicker.CancelLabel })
+            Assert.Equal(text, big5.GetString(big5.GetBytes(text)));
+    }
+
+    [Fact]
+    public void 狀態列顯示選定的專案與來源()
+    {
+        var picked = SdkFile("B/Web/Web.csproj");
+        var project = ProjectDiscovery.Scan(_tree.Root).Projects.Single();
+        var config = DiagConfig.Load(null, null, picked);
+
+        Assert.Equal("專案: B/Web/Web.csproj（選單）", ProjectSelection.StartupStatus(project, "選單", config, _tree.Root));
+    }
+
+    [Fact]
+    public void 設定檔的buildProject取代選定專案時狀態列列出實際建置目標()
+    {
+        SdkFile("B/B.csproj");
+        var picked = SdkFile("B/Web/Web.csproj");
+        File.WriteAllText(_tree.PathOf("B/clrdiag.json"), """{ "buildProject": "B.csproj" }""");
+        var project = ProjectDiscovery.Scan(_tree.Root).Projects.Single(p => p.Name == "Web");
+        var config = DiagConfig.Load(null, null, picked);
+
+        Assert.Equal(
+            "專案: B/Web/Web.csproj（預設）  建置目標: B/B.csproj（clrdiag.json 的 buildProject 優先）",
+            ProjectSelection.StartupStatus(project, "預設", config, _tree.Root)
+        );
     }
 
     [Fact]

@@ -14,6 +14,12 @@ public sealed record DiagConfig
     /// <summary>設定檔預設檔名，會從目前目錄往上尋找。</summary>
     public const string FileName = "clrdiag.json";
 
+    /// <summary>
+    /// 視為方案檔或專案檔的副檔名，依自動挑選建置目標的優先順序排列；
+    /// 工作目錄的專案掃描也使用同一份清單。
+    /// </summary>
+    public static readonly IReadOnlyList<string> ProjectExtensions = new[] { ".sln", ".slnx", ".csproj", ".vbproj" };
+
     /// <summary>專案根目錄。設定檔中的相對路徑都以此為基準。</summary>
     [JsonIgnore]
     public string Root { get; init; } = Directory.GetCurrentDirectory();
@@ -279,14 +285,16 @@ public sealed record DiagConfig
     private static string? FindBuildTarget(string root)
     {
         var directory = new DirectoryInfo(root);
-        return directory.EnumerateFiles("*.sln").FirstOrDefault()?.FullName ?? directory
-                .EnumerateFiles("*.slnx")
-                .FirstOrDefault()
-                ?.FullName
-            ?? directory.EnumerateFiles("*.csproj").FirstOrDefault()?.FullName ?? directory
-                .EnumerateFiles("*.vbproj")
-                .FirstOrDefault()
-                ?.FullName;
+        foreach (string extension in ProjectExtensions)
+        {
+            string? found = directory.EnumerateFiles("*" + extension).FirstOrDefault()?.FullName;
+            if (found is not null)
+            {
+                return found;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>SDK 樣式專案（Project Sdk="..."）用 dotnet build；舊式 .NET Framework 專案需要 MSBuild。</summary>

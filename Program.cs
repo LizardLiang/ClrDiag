@@ -61,8 +61,13 @@ for (int i = 0; i < args.Length; i++)
         case "--config" when i + 1 < args.Length:
             configPath = args[++i];
             break;
-        case "--project" when i + 1 < args.Length:
-            projectQuery = args[++i];
+        case "--project":
+            projectQuery = TakeValue(args, ref i);
+            if (projectQuery is null)
+            {
+                return MissingValue("--project");
+            }
+
             break;
         case "--pick":
             pickMode = true;
@@ -70,8 +75,13 @@ for (int i = 0; i < args.Length; i++)
         case "--projects":
             projectsMode = true;
             break;
-        case "--set-default" when i + 1 < args.Length:
-            setDefaultQuery = args[++i];
+        case "--set-default":
+            setDefaultQuery = TakeValue(args, ref i);
+            if (setDefaultQuery is null)
+            {
+                return MissingValue("--set-default");
+            }
+
             break;
         case "--clear-default":
             clearDefaultMode = true;
@@ -179,75 +189,72 @@ if (batchOutputMode || projectCommandMode)
 // 以工作目錄為鍵。--projects / --set-default / --clear-default 只管理這份記錄，做完就結束。
 string workingDir = Directory.GetCurrentDirectory();
 var projectStore = new ProjectStateStore(ProjectStateStore.DefaultPath);
+bool explicitRoot = root is not null || configPath is not null;
+
+// --output、--init 與 --install-skill 不掃描工作目錄：--output 不讀專案設定，
+// --init 與 --install-skill 寫入往上搜尋得到的專案根目錄。
+bool usesDiscovery = ProjectSelection.UsesDiscovery(outputMode, initMode, skillScope is not null);
+
+foreach (
+    string warning in ProjectSelection.ConflictWarnings(
+        explicitRoot,
+        projectQuery is not null || pickMode,
+        projectCommandMode,
+        usesDiscovery
+    )
+)
+{
+    PrintNotice(warning);
+}
 
 if (projectCommandMode)
 {
     return RunProjectCommand(projectStore, workingDir, projectsMode, setDefaultQuery, clearDefaultMode);
 }
 
-// 互動 = 沒有任何批次旗標，且輸入輸出都接在真正的主控台上；只有互動時才會顯示選單、寫入記錄。
-bool interactive =
-    !batchOutputMode
-    && !listMode
-    && !initMode
-    && !buildMode
-    && !exportMode
-    && sendCommand is null
-    && !pipeNameMode
-    && !installSkillMode
-    && !Console.IsInputRedirected
-    && !Console.IsOutputRedirected;
-
-// --output 與 --install-skill global 不讀任何專案設定，維持原本往上搜尋的行為。
-bool usesProject = !outputMode && skillScope != SkillScope.Global;
+// 互動 = 沒有任何批次旗標、輸入輸出都接在真正的主控台上，且 Spectre 判斷終端機可互動；
+// 只有互動時才會顯示選單、寫入記錄；不可互動時與批次模式一樣解析專案。
+// 這裡位於上面的 UTF-8 設定之後才讀取 AnsiConsole.Profile，符合該處說明的初始化順序。
+bool interactive = ProjectSelection.IsInteractive(
+    batchOutputMode
+        || listMode
+        || initMode
+        || buildMode
+        || exportMode
+        || sendCommand is not null
+        || pipeNameMode
+        || installSkillMode,
+    Console.IsInputRedirected,
+    Console.IsOutputRedirected,
+    () => AnsiConsole.Profile.Capabilities.Interactive
+);
 
 DiscoveredProject? chosenProject = null;
 string? chosenProjectLabel = null;
-if (root is null && configPath is null && usesProject)
+if (!explicitRoot && usesDiscovery)
 {
-    IReadOnlyList<DiscoveredProject> discovered = ProjectDiscovery.Scan(workingDir);
-    ProjectState saved = projectStore.Get(workingDir);
-    ProjectResolution resolution = ProjectResolver.Resolve(
-        discovered,
-        saved,
+    ProjectSelectionResult selection = ProjectSelection.Resolve(
+        projectStore,
+        workingDir,
         projectQuery,
         pickMode,
-        interactive
+        interactive,
+        ProjectPicker.Pick,
+        PrintNotice
     );
 
-    // 已不存在的記錄只在互動模式清除；批次模式只讀不寫。
-    if (interactive && resolution.StaleDefault)
+    if (selection.Error is { } miss)
     {
-        projectStore.ClearDefault(workingDir);
+        PrintProjectCandidates(miss);
     }
 
-    if (interactive && resolution.StaleLastRun)
+    if (selection.ExitCode is { } exitCode)
     {
-        projectStore.ClearLastRun(workingDir);
+        return exitCode;
     }
 
-    switch (resolution.Outcome)
-    {
-        case ResolveOutcome.Use use:
-            chosenProject = use.Project;
-            chosenProjectLabel = ProjectSourceLabel(use.Source);
-            break;
-        case ResolveOutcome.Prompt prompt:
-            ProjectPick pick = ProjectPicker.Pick(prompt.Projects, prompt.Preselect, saved);
-            chosenProject = pick.Project;
-            chosenProjectLabel = "選單";
-            if (pick.SetAsDefault)
-            {
-                chosenProjectLabel = projectStore.SetDefault(workingDir, pick.Project.FullPath)
-                    ? "選單，已設為預設"
-                    : "選單，預設專案寫入失敗";
-            }
-
-            break;
-        case ResolveOutcome.Error error:
-            PrintProjectCandidates(error.Message, error.Candidates);
-            return 2;
-    }
+    chosenProject = selection.Project;
+    chosenProjectLabel = selection.Label;
 }
 
 DiagConfig config;
@@ -401,12 +408,12 @@ if (Console.IsOutputRedirected)
 string? startupStatus = null;
 if (chosenProject is not null)
 {
-    if (interactive)
+    if (interactive && !projectStore.SetLastRun(workingDir, chosenProject.FullPath))
     {
-        projectStore.SetLastRun(workingDir, chosenProject.FullPath);
+        PrintStoreWriteFailure(projectStore, fatal: false);
     }
 
-    startupStatus = $"專案: {chosenProject.RelativePath}（{chosenProjectLabel}）";
+    startupStatus = ProjectSelection.StartupStatus(chosenProject, chosenProjectLabel, config, workingDir);
 }
 
 using var app = new DiagApp(config, effectivePort, startupStatus);
@@ -478,25 +485,57 @@ static int? ResolveTarget(DiagConfig config, int? pid)
     return null;
 }
 
-/// <summary>啟動訊息中說明專案來源的文字。</summary>
-static string ProjectSourceLabel(ProjectSource source) =>
-    source switch
-    {
-        ProjectSource.Explicit => "--project",
-        ProjectSource.Default => "預設",
-        ProjectSource.Single => "唯一專案",
-        ProjectSource.LastRun => "上次執行",
-        _ => source.ToString(),
-    };
-
-/// <summary>印出錯誤訊息與候選專案的相對路徑。</summary>
-static void PrintProjectCandidates(string message, IReadOnlyList<DiscoveredProject> candidates)
+/// <summary>
+/// 取出旗標後面的值並把 i 前移；沒有下一個參數或下一個參數是另一個旗標（-- 開頭）時回傳 null，i 不變。
+/// </summary>
+static string? TakeValue(string[] args, ref int i)
 {
-    AnsiConsole.MarkupLine($"[red]{Markup.Escape(message)}[/]");
-    foreach (DiscoveredProject candidate in candidates)
+    if (i + 1 >= args.Length || args[i + 1].StartsWith("--", StringComparison.Ordinal))
+    {
+        return null;
+    }
+
+    return args[++i];
+}
+
+/// <summary>旗標缺少值時的錯誤訊息，結束碼與未知參數相同。</summary>
+static int MissingValue(string flag)
+{
+    AnsiConsole.MarkupLine($"[red]{Markup.Escape(flag)} 需要專案名稱或相對路徑[/]");
+    return 2;
+}
+
+/// <summary>非致命的提示訊息（黃色），例如旗標衝突、掃描上限、記錄寫入失敗。</summary>
+static void PrintNotice(string message) => AnsiConsole.MarkupLine($"[yellow]{Markup.Escape(message)}[/]");
+
+/// <summary>印出比對失敗的訊息與候選專案的相對路徑；沒有候選時說明工作目錄底下沒有專案。</summary>
+static void PrintProjectCandidates(ProjectMiss miss)
+{
+    AnsiConsole.MarkupLine($"[red]{Markup.Escape(miss.Message)}[/]");
+    if (miss.Candidates.Count == 0)
+    {
+        AnsiConsole.MarkupLine(
+            $"  （工作目錄底下沒有偵測到任何 {Markup.Escape(ProjectDiscovery.ExtensionList)}）"
+        );
+        return;
+    }
+
+    foreach (DiscoveredProject candidate in miss.Candidates)
     {
         AnsiConsole.MarkupLine($"  {Markup.Escape(candidate.RelativePath)}");
     }
+}
+
+/// <summary>專案記錄寫入失敗時的訊息：管理指令視為錯誤（紅色），其餘流程只提示（黃色）。</summary>
+static void PrintStoreWriteFailure(ProjectStateStore store, bool fatal)
+{
+    if (fatal)
+    {
+        AnsiConsole.MarkupLine($"[red]{Markup.Escape(store.WriteFailureMessage)}[/]");
+        return;
+    }
+
+    PrintNotice(store.WriteFailureMessage);
 }
 
 /// <summary>
@@ -515,7 +554,7 @@ static int RunProjectCommand(
     {
         if (!store.ClearDefault(workingDir))
         {
-            AnsiConsole.MarkupLine($"[red]無法寫入專案記錄:[/] {Markup.Escape(ProjectStateStore.DefaultPath)}");
+            PrintStoreWriteFailure(store, fatal: true);
             return 1;
         }
 
@@ -527,39 +566,55 @@ static int RunProjectCommand(
         return 0;
     }
 
-    IReadOnlyList<DiscoveredProject> discovered = ProjectDiscovery.Scan(workingDir);
+    ScanResult scan = ProjectDiscovery.Scan(workingDir);
+    if (scan.Truncated)
+    {
+        PrintNotice(ProjectDiscovery.TruncatedNotice);
+    }
 
     if (setDefaultQuery is not null)
     {
-        MatchResult match = ProjectDiscovery.Match(discovered, setDefaultQuery);
-        if (match.Hit is null)
+        int setResult = ApplySetDefault(store, workingDir, setDefaultQuery, scan.Projects);
+        if (setResult != 0)
         {
-            PrintProjectCandidates(
-                match.Candidates.Count > 1
-                    ? $"「{setDefaultQuery}」符合多個專案，請指定更完整的路徑"
-                    : $"找不到符合「{setDefaultQuery}」的專案",
-                match.Candidates.Count > 1 ? match.Candidates : discovered
-            );
-            return 2;
+            return setResult;
         }
-
-        if (!store.SetDefault(workingDir, match.Hit.FullPath))
-        {
-            AnsiConsole.MarkupLine($"[red]無法寫入專案記錄:[/] {Markup.Escape(ProjectStateStore.DefaultPath)}");
-            return 1;
-        }
-
-        AnsiConsole.MarkupLine($"預設專案: {Markup.Escape(match.Hit.RelativePath)}");
     }
 
-    if (!list)
+    return list ? PrintProjectTable(store, workingDir, scan.Projects) : 0;
+}
+
+/// <summary>--set-default：比對名稱並寫入預設專案。回傳 0 成功、2 沒有唯一符合、1 寫入失敗。</summary>
+static int ApplySetDefault(
+    ProjectStateStore store,
+    string workingDir,
+    string query,
+    IReadOnlyList<DiscoveredProject> discovered
+)
+{
+    MatchResult match = ProjectDiscovery.Match(discovered, query);
+    if (match.Hit is null)
     {
-        return 0;
+        PrintProjectCandidates(ProjectDiscovery.DescribeMiss(query, match, discovered));
+        return 2;
     }
 
+    if (!store.SetDefault(workingDir, match.Hit.FullPath))
+    {
+        PrintStoreWriteFailure(store, fatal: true);
+        return 1;
+    }
+
+    AnsiConsole.MarkupLine($"預設專案: {Markup.Escape(match.Hit.RelativePath)}");
+    return 0;
+}
+
+/// <summary>--projects：列出偵測到的專案與預設、上次執行標記。沒有任何專案時回傳 1。</summary>
+static int PrintProjectTable(ProjectStateStore store, string workingDir, IReadOnlyList<DiscoveredProject> discovered)
+{
     if (discovered.Count == 0)
     {
-        AnsiConsole.MarkupLine("[red]找不到任何 .sln / .csproj[/]");
+        AnsiConsole.MarkupLine($"[red]找不到任何 {Markup.Escape(ProjectDiscovery.ExtensionList)}[/]");
         return 1;
     }
 
@@ -1053,7 +1108,7 @@ static void PrintHelp()
           clrdiag --root <path>         指定專案根目錄（不做專案自動偵測）
           clrdiag --project <名稱>      以名稱或相對路徑指定工作目錄底下的專案
           clrdiag --pick                不使用預設專案，一律顯示專案選單
-          clrdiag --projects            列出工作目錄底下偵測到的專案（★ 預設、↺ 上次）
+          clrdiag --projects            列出工作目錄底下偵測到的專案（★ 預設、◎ 上次）
           clrdiag --set-default <名稱>  設定這個工作目錄的預設專案
           clrdiag --clear-default       清除這個工作目錄的預設專案
 
@@ -1061,6 +1116,9 @@ static void PrintHelp()
           沒有 --root / --config 時，往下掃描工作目錄（深度 5）的 .sln / .slnx / .csproj / .vbproj。
           決定順序：--project → --pick（選單）→ 預設專案 → 只有一個專案 → 選單（上次執行排第一）。
           批次模式不顯示選單，沿用上次執行的專案；仍無法決定時列出候選並以結束碼 2 結束。
+          --project 的值空白或沒有唯一符合（包括沒有偵測到任何專案）時以結束碼 2 結束。
+          選單最後一項「取消」不啟動儀表板，以結束碼 0 結束。
+          --init、--install-skill、--output 不做專案偵測。
           記錄存在 %LOCALAPPDATA%\clrdiag\projects.json，以工作目錄為鍵。
 
         設定檔

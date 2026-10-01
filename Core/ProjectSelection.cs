@@ -1,0 +1,184 @@
+namespace ClrDiag.Core;
+
+/// <summary>使用者在選單中挑選專案的結果；SetAsDefault 表示使用者同意把它設為預設專案。</summary>
+public sealed record ProjectPick(DiscoveredProject Project, bool SetAsDefault);
+
+/// <summary>
+/// 啟動前專案選擇的結果。ExitCode 不為 null 時呼叫端以這個結束碼結束（Error 不為 null 時先印出它）；
+/// ExitCode 為 null 且 Project 為 null 表示工作目錄底下沒有專案，改走往上搜尋專案根目錄。
+/// </summary>
+public sealed record ProjectSelectionResult(
+    DiscoveredProject? Project,
+    string? Label,
+    int? ExitCode,
+    ProjectMiss? Error
+);
+
+/// <summary>
+/// 啟動流程中與專案選擇有關的決策：是否互動、哪些模式做專案偵測、旗標衝突警告、
+/// 掃描 → 解析 → 選單 → 記錄的串接，以及狀態列文字。主控台輸出由呼叫端負責，
+/// 選單以委派傳入，因此整段流程可以在測試中執行。
+/// </summary>
+public static class ProjectSelection
+{
+    /// <summary>使用者在選單選「取消」時的結束碼，與儀表板正常結束相同。</summary>
+    public const int CancelExitCode = 0;
+
+    /// <summary>無法決定專案（名稱沒有唯一符合、批次模式有多個專案）時的結束碼。</summary>
+    public const int ErrorExitCode = 2;
+
+    /// <summary>
+    /// 是否為互動模式：沒有任何批次旗標、輸入輸出都接在主控台上，且終端機支援互動。
+    /// consoleInteractive 只在前面條件都成立時才呼叫，批次模式不會觸發 Spectre Profile 的建立。
+    /// </summary>
+    public static bool IsInteractive(
+        bool anyBatchFlag,
+        bool inputRedirected,
+        bool outputRedirected,
+        Func<bool> consoleInteractive
+    ) => !anyBatchFlag && !inputRedirected && !outputRedirected && consoleInteractive();
+
+    /// <summary>
+    /// 這次執行是否做專案偵測。--output 不讀專案設定；--init 與 --install-skill（不論範圍）
+    /// 寫入往上搜尋得到的專案根目錄，因此三者都不掃描工作目錄。
+    /// </summary>
+    public static bool UsesDiscovery(bool outputMode, bool initMode, bool installSkillMode) =>
+        !outputMode && !initMode && !installSkillMode;
+
+    /// <summary>
+    /// 彼此不生效的旗標組合對應的警告文字，沒有衝突時回傳空清單。
+    /// explicitRoot 表示有 --root 或 --config；projectFlags 表示有 --project 或 --pick；
+    /// projectCommand 表示有 --projects、--set-default 或 --clear-default。
+    /// </summary>
+    public static IReadOnlyList<string> ConflictWarnings(
+        bool explicitRoot,
+        bool projectFlags,
+        bool projectCommand,
+        bool usesDiscovery
+    )
+    {
+        var warnings = new List<string>();
+        if (projectCommand)
+        {
+            if (explicitRoot)
+                warnings.Add("--projects / --set-default / --clear-default 依目前工作目錄運作，--root / --config 不生效");
+            if (projectFlags)
+                warnings.Add("--projects / --set-default / --clear-default 不啟動診斷，--project / --pick 不生效");
+            return warnings;
+        }
+
+        if (!projectFlags)
+            return warnings;
+
+        if (explicitRoot)
+            warnings.Add("已用 --root / --config 指定專案根目錄，--project / --pick 不生效");
+        else if (!usesDiscovery)
+            warnings.Add("--init / --install-skill / --output 不做專案偵測，--project / --pick 不生效");
+
+        return warnings;
+    }
+
+    /// <summary>
+    /// 掃描工作目錄並決定要用的專案。interactive 時移除已失效的記錄、必要時呼叫 prompt 顯示選單，
+    /// 使用者同意時寫入預設專案；prompt 回傳 null 代表使用者取消。
+    /// 掃描達到上限、記錄寫入失敗、使用者取消等非致命訊息交給 notice 輸出。
+    /// </summary>
+    public static ProjectSelectionResult Resolve(
+        ProjectStateStore store,
+        string workingDir,
+        string? projectQuery,
+        bool pick,
+        bool interactive,
+        Func<IReadOnlyList<DiscoveredProject>, DiscoveredProject?, ProjectState, ProjectPick?> prompt,
+        Action<string> notice
+    )
+    {
+        ScanResult scan = ProjectDiscovery.Scan(workingDir);
+        ProjectState saved = store.Get(workingDir);
+        IReadOnlyList<DiscoveredProject> discovered = scan.Projects;
+        if (scan.Truncated)
+        {
+            notice(ProjectDiscovery.TruncatedNotice);
+            discovered = ProjectDiscovery.IncludeSaved(discovered, workingDir, saved);
+        }
+
+        ProjectResolution resolution = ProjectResolver.Resolve(discovered, saved, projectQuery, pick, interactive);
+
+        // 已不存在的記錄只在互動模式清除；批次模式只讀不寫。
+        if (interactive && resolution.StaleDefault && !store.ClearDefault(workingDir))
+            notice(store.WriteFailureMessage);
+
+        if (interactive && resolution.StaleLastRun && !store.ClearLastRun(workingDir))
+            notice(store.WriteFailureMessage);
+
+        switch (resolution.Outcome)
+        {
+            case ResolveOutcome.Use use:
+                return new ProjectSelectionResult(use.Project, SourceLabel(use.Source), null, null);
+
+            case ResolveOutcome.Prompt choose:
+                ProjectPick? picked = prompt(choose.Projects, choose.Preselect, saved);
+                if (picked is null)
+                {
+                    notice("已取消，未啟動儀表板");
+                    return new ProjectSelectionResult(null, null, CancelExitCode, null);
+                }
+
+                string label = "選單";
+                if (picked.SetAsDefault)
+                {
+                    if (store.SetDefault(workingDir, picked.Project.FullPath))
+                        label = "選單，已設為預設";
+                    else
+                        notice(store.WriteFailureMessage);
+                }
+
+                return new ProjectSelectionResult(picked.Project, label, null, null);
+
+            case ResolveOutcome.Error error:
+                return new ProjectSelectionResult(
+                    null,
+                    null,
+                    ErrorExitCode,
+                    new ProjectMiss(error.Message, error.Candidates)
+                );
+
+            default:
+                return new ProjectSelectionResult(null, null, null, null);
+        }
+    }
+
+    /// <summary>啟動訊息中說明專案來源的文字。</summary>
+    public static string SourceLabel(ProjectSource source) =>
+        source switch
+        {
+            ProjectSource.Explicit => "--project",
+            ProjectSource.Default => "預設",
+            ProjectSource.Single => "唯一專案",
+            ProjectSource.LastRun => "上次執行",
+            _ => source.ToString(),
+        };
+
+    /// <summary>
+    /// 儀表板啟動時狀態列的文字：選定的專案與來源。clrdiag.json 的 buildProject 讓實際建置目標
+    /// 不是選定的專案時，一併列出實際建置目標（相對於工作目錄）並註明來自設定檔。
+    /// </summary>
+    public static string StartupStatus(DiscoveredProject project, string? label, DiagConfig config, string workingDir)
+    {
+        string status = $"專案: {project.RelativePath}（{label}）";
+        if (
+            config.ResolvedBuildProject is { } target
+            && !string.Equals(
+                Path.GetFullPath(target),
+                Path.GetFullPath(project.FullPath),
+                StringComparison.OrdinalIgnoreCase
+            )
+        )
+        {
+            string relative = Path.GetRelativePath(workingDir, target).Replace('\\', '/');
+            status += $"  建置目標: {relative}（{DiagConfig.FileName} 的 buildProject 優先）";
+        }
+
+        return status;
+    }
+}
