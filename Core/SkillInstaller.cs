@@ -46,11 +46,11 @@ internal static class SkillInstaller
             _ => null,
         };
 
-    /// <summary>--install-skill 參數用法說明（參數缺漏或拼錯時印出）。</summary>
-    public static void PrintUsage()
+    /// <summary>--install-skill 參數用法說明（參數缺漏或拼錯時寫到 output）。</summary>
+    public static void PrintUsage(TextWriter output)
     {
         // 說明文字含方括號，交給 Spectre 會被當成樣式標記，因此直接輸出純文字
-        Console.WriteLine(
+        output.WriteLine(
             """
             用法
               clrdiag --install-skill global   裝到 %USERPROFILE%\.claude\skills\clrdiag（所有專案都能用）

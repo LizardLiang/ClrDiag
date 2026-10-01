@@ -141,12 +141,10 @@ for (int i = 0; i < args.Length; i++)
             break;
         case "--help":
         case "-h":
-            PrintHelp();
+            PrintHelp(Console.Out);
             return 0;
         default:
-            AnsiConsole.MarkupLine($"[red]未知參數:[/] {Markup.Escape(arg)}");
-            PrintHelp();
-            return 2;
+            return ArgumentError($"[red]未知參數:[/] {Markup.Escape(arg)}", PrintHelp);
     }
 }
 
@@ -155,21 +153,21 @@ for (int i = 0; i < args.Length; i++)
 SkillScope? skillScope = SkillInstaller.ParseScope(installSkillScope);
 if (installSkillMode && skillScope is null)
 {
-    AnsiConsole.MarkupLine(
+    return ArgumentError(
         installSkillScope is null
             ? "[red]--install-skill 需要指定範圍（global 或 local）[/]"
-            : $"[red]--install-skill 的範圍只能是 global 或 local:[/] {Markup.Escape(installSkillScope)}"
+            : $"[red]--install-skill 的範圍只能是 global 或 local:[/] {Markup.Escape(installSkillScope)}",
+        SkillInstaller.PrintUsage
     );
-    SkillInstaller.PrintUsage();
-    return 2;
 }
 
 // 所有非互動模式（設計上就是給重新導向到檔案／管線，或代理程式讀取用）的標準輸出與標準錯誤都是 UTF-8：
 // 不主動設定的話 Console 會沿用作業系統目前的主控台字碼頁（繁體中文 Windows 預設是 Big5 950），
 // 寫進檔案後任何用 UTF-8 讀取的消費端（例如本檔案）看到的都是亂碼。互動式儀表板不套用這段，
-// 免得動到 Spectre.Console 畫框線／版面時的終端機能力偵測。這段設定位於第一次呼叫 AnsiConsole
-// 之前——包括下面 DiagConfig.Load 失敗時的錯誤訊息——Spectre 的 Profile 是第一次使用時
-// 惰性建立並快取，事後才改字碼頁不會讓已經印出的內容或已快取的判斷跟著變。
+// 免得動到 Spectre.Console 畫框線／版面時的終端機能力偵測。上面的參數錯誤在 ArgumentError 裡
+// 自行切換成 UTF-8 再印出；除此之外，這段設定位於第一次使用 AnsiConsole 之前——包括下面
+// DiagConfig.Load 失敗時的錯誤訊息——Spectre 的 Profile 是第一次使用時惰性建立並快取，
+// 事後才改字碼頁不會讓已經印出的內容或已快取的判斷跟著變。
 bool batchOutputMode = dapMode || snapshotMode || threadMode || rootsType is not null || renderMode || outputMode;
 bool projectCommandMode = projectsMode || setDefaultQuery is not null || clearDefaultMode;
 bool nonInteractiveFlag =
@@ -184,7 +182,7 @@ bool nonInteractiveFlag =
     || installSkillMode;
 if (nonInteractiveFlag)
 {
-    Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+    UseUtf8Output();
 }
 
 // 專案自動偵測：往下掃描工作目錄的 .sln / .csproj，記錄存在 %LOCALAPPDATA%\clrdiag\projects.json，
@@ -199,7 +197,7 @@ bool usesDiscovery = ProjectSelection.UsesDiscovery(outputMode, initMode, skillS
 
 // 互動 = 沒有任何批次旗標或專案管理指令、輸入輸出都接在真正的主控台上，且 Spectre 判斷終端機可互動；
 // 只有互動時才會顯示選單、寫入記錄；不可互動時與批次模式一樣解析專案。
-// 這裡位於上面的 UTF-8 設定之後才讀取 AnsiConsole.Profile，符合該處說明的初始化順序。
+// AnsiConsole.Profile 在上面的 UTF-8 設定之後才第一次讀取。
 bool interactive = ProjectSelection.IsInteractive(
     nonInteractiveFlag,
     Console.IsInputRedirected,
@@ -243,7 +241,8 @@ if (!explicitRoot && usesDiscovery)
         pickMode,
         interactive,
         ProjectPicker.Pick,
-        notices.Write
+        notices.Write,
+        ambiguousFallsBackUpward: listMode
     );
 
     if (selection.Error is { } miss)
@@ -267,7 +266,7 @@ try
 }
 catch (Exception ex)
 {
-    AnsiConsole.MarkupLine($"[red]設定載入失敗:[/] {Markup.Escape(ex.Message)}");
+    StandardError().MarkupLine($"[red]設定載入失敗:[/] {Markup.Escape(ex.Message)}");
     return 2;
 }
 
@@ -504,11 +503,24 @@ static string? TakeValue(string[] args, ref int i)
 }
 
 /// <summary>旗標缺少值時的錯誤訊息，結束碼與未知參數相同。</summary>
-static int MissingValue(string flag)
+static int MissingValue(string flag) =>
+    ArgumentError($"[red]{Markup.Escape(flag)} 需要專案名稱或相對路徑[/]", usage: null);
+
+/// <summary>
+/// 參數錯誤：先把輸出切換成 UTF-8，再於標準錯誤印出錯誤訊息與用法（usage 為 null 時只印訊息），回傳結束碼 2。
+/// 參數錯誤一律不啟動儀表板，因此與批次模式一樣使用 UTF-8；標準輸出不寫入任何內容。
+/// </summary>
+static int ArgumentError(string markup, Action<TextWriter>? usage)
 {
-    AnsiConsole.MarkupLine($"[red]{Markup.Escape(flag)} 需要專案名稱或相對路徑[/]");
+    UseUtf8Output();
+    StandardError().MarkupLine(markup);
+    usage?.Invoke(Console.Error);
     return 2;
 }
+
+/// <summary>標準輸出與標準錯誤改用不含 BOM 的 UTF-8；Console 會依新的編碼重建兩個串流。</summary>
+static void UseUtf8Output() =>
+    Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
 /// <summary>
 /// 寫到標準錯誤的 Spectre 主控台：專案比對失敗與專案管理指令的錯誤訊息寫在這裡，標準輸出只留給結果。
@@ -570,9 +582,9 @@ static int RunProjectCommand(
     }
 
     ScanResult scan = ProjectDiscovery.Scan(workingDir);
-    if (scan.Truncated)
+    foreach (string message in ProjectDiscovery.ScanNotices(scan))
     {
-        notices.Write(ProjectDiscovery.TruncatedNotice);
+        notices.Write(message);
     }
 
     if (setDefaultQuery is not null)
@@ -1078,7 +1090,8 @@ static async Task<int> RunOutput(int? pid)
     }
 }
 
-static void PrintHelp()
+/// <summary>把說明文字寫到 output：--help 寫到標準輸出，參數錯誤時寫到標準錯誤。</summary>
+static void PrintHelp(TextWriter output)
 {
     string version =
         Assembly
@@ -1086,7 +1099,7 @@ static void PrintHelp()
             ?.GetCustomAttribute<AssemblyInformationalVersionAttribute>()
             ?.InformationalVersion ?? "unknown";
     // 說明文字含 [--top N] 這類方括號，交給 Spectre 會被當成樣式標記，因此直接輸出純文字
-    Console.WriteLine(
+    output.WriteLine(
         $"""
         clrdiag {version} — 終端機版 .NET 記憶體 / 執行緒診斷主控台（不需要 Visual Studio）
 

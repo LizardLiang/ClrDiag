@@ -26,7 +26,10 @@ public abstract record ResolveOutcome
     public sealed record Prompt(IReadOnlyList<DiscoveredProject> Projects, DiscoveredProject? Preselect)
         : ResolveOutcome;
 
-    /// <summary>工作目錄底下沒有任何專案，沿用往上搜尋專案根目錄的行為。</summary>
+    /// <summary>
+    /// 沿用往上搜尋專案根目錄的行為：工作目錄底下沒有任何專案，
+    /// 或呼叫端允許（--list）時非互動模式遇到多個專案且沒有可用的記錄。
+    /// </summary>
     public sealed record FallBackUpward : ResolveOutcome;
 
     /// <summary>無法決定專案；Candidates 是要列給使用者參考的專案。</summary>
@@ -40,7 +43,7 @@ public abstract record ResolveOutcome
 public sealed record ProjectResolution(ResolveOutcome Outcome, bool StaleDefault, bool StaleLastRun);
 
 /// <summary>
-/// 依「--project → 沒有任何專案時往上搜尋 → --pick → 預設專案 → 唯一專案 → 選單／上次執行」的順序決定要用哪個專案。
+/// 依「--project → 沒有任何專案時往上搜尋 → --pick → 預設專案 → 唯一專案 → 選單／上次執行 → 錯誤或往上搜尋」的順序決定要用哪個專案。
 /// 純邏輯，不做任何主控台輸出；非互動模式永遠不回傳 Prompt。
 /// </summary>
 public static class ProjectResolver
@@ -49,13 +52,16 @@ public static class ProjectResolver
     /// 解析要使用的專案。projectQuery 是 --project 的值，不為 null 就代表有指定：
     /// 空白或沒有唯一符合（包括工作目錄底下沒有任何專案）時回傳 Error。
     /// pick 對應 --pick，只在互動模式生效；interactive 表示可以顯示選單。
+    /// ambiguousFallsBackUpward 為 true 時，非互動模式有多個專案且沒有可用的記錄回傳 FallBackUpward 而不是 Error；
+    /// --project 沒有唯一符合時仍回傳 Error。
     /// </summary>
     public static ProjectResolution Resolve(
         IReadOnlyList<DiscoveredProject> discovered,
         ProjectState saved,
         string? projectQuery,
         bool pick,
-        bool interactive
+        bool interactive,
+        bool ambiguousFallsBackUpward = false
     )
     {
         var defaultProject = FindSaved(discovered, saved.Default, out var staleDefault);
@@ -90,6 +96,9 @@ public static class ProjectResolver
 
         if (lastRunProject is not null)
             return Result(new ResolveOutcome.Use(lastRunProject, ProjectSource.LastRun));
+
+        if (ambiguousFallsBackUpward)
+            return Result(new ResolveOutcome.FallBackUpward());
 
         return Result(
             new ResolveOutcome.Error("找到多個專案，請用 --project 指定，或用 --set-default 設定預設專案", discovered)

@@ -20,7 +20,8 @@ public sealed class ProjectSelectionTests : IDisposable
         string? project = null,
         bool pick = false,
         bool interactive = true,
-        Func<IReadOnlyList<DiscoveredProject>, ProjectPick?>? prompt = null
+        Func<IReadOnlyList<DiscoveredProject>, ProjectPick?>? prompt = null,
+        bool ambiguousFallsBackUpward = false
     )
     {
         Directory.CreateDirectory(WorkDir);
@@ -35,7 +36,8 @@ public sealed class ProjectSelectionTests : IDisposable
                 _promptCalls++;
                 return prompt is null ? new ProjectPick(projects[0], false) : prompt(projects);
             },
-            _notices.Add
+            _notices.Add,
+            ambiguousFallsBackUpward
         );
     }
 
@@ -169,6 +171,44 @@ public sealed class ProjectSelectionTests : IDisposable
         Assert.Equal(2, result.ExitCode);
         Assert.Equal(2, result.Error?.Candidates.Count);
         Assert.Equal(0, _promptCalls);
+    }
+
+    [Fact]
+    public void Resolve_list多個專案沒有記錄時改走往上搜尋並提示且不寫入記錄()
+    {
+        TwoProjects();
+
+        var result = Resolve(new ProjectStateStore(StorePath), interactive: false, ambiguousFallsBackUpward: true);
+
+        Assert.Equal(new ProjectSelectionResult(null, null, null, null), result);
+        Assert.Contains(ProjectSelection.AmbiguousListNotice, _notices);
+        Assert.Equal(0, _promptCalls);
+        Assert.False(File.Exists(StorePath));
+    }
+
+    [Fact]
+    public void Resolve_list指定專案沒有符合時仍以結束碼2結束()
+    {
+        TwoProjects();
+
+        var result = Resolve(
+            new ProjectStateStore(StorePath),
+            project: "Nope",
+            interactive: false,
+            ambiguousFallsBackUpward: true
+        );
+
+        Assert.Equal(2, result.ExitCode);
+        Assert.DoesNotContain(ProjectSelection.AmbiguousListNotice, _notices);
+    }
+
+    [Fact]
+    public void Resolve_沒有任何專案改走往上搜尋時不提示多個專案()
+    {
+        var result = Resolve(new ProjectStateStore(StorePath), interactive: false, ambiguousFallsBackUpward: true);
+
+        Assert.Equal(new ProjectSelectionResult(null, null, null, null), result);
+        Assert.Empty(_notices);
     }
 
     [Fact]

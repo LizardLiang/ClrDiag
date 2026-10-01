@@ -15,9 +15,10 @@ public sealed record DiscoveredProject(string FullPath, string RelativePath, str
 public sealed record MatchResult(DiscoveredProject? Hit, IReadOnlyList<DiscoveredProject> Candidates);
 
 /// <summary>
-/// 掃描結果。Truncated 為 true 表示掃描在資料夾數或時間上限內沒有走完，Projects 可能不完整。
+/// 掃描結果。Truncated 為 true 表示掃描在資料夾數或時間上限內沒有走完，Projects 可能不完整；
+/// UnreadableLinks 是因為無法讀取連結目標而略過的資料夾數。
 /// </summary>
-public sealed record ScanResult(IReadOnlyList<DiscoveredProject> Projects, bool Truncated);
+public sealed record ScanResult(IReadOnlyList<DiscoveredProject> Projects, bool Truncated, int UnreadableLinks);
 
 /// <summary>比對沒有唯一結果時要告訴使用者的訊息，以及要列出的候選專案（可能是空清單）。</summary>
 public sealed record ProjectMiss(string Message, IReadOnlyList<DiscoveredProject> Candidates);
@@ -36,13 +37,27 @@ public static class ProjectDiscovery
 
     /// <summary>
     /// 一次掃描的時間上限。資料夾數上限是主要的停止條件，讓掃描結果不受機器負載影響；
-    /// 這個時間上限只防止慢速網路磁碟讓啟動停住，正常的工作目錄在資料夾數上限內就會走完。
+    /// 這個時間上限防止慢速網路磁碟或 OneDrive 只存放在雲端的資料夾讓啟動停住，正常的工作目錄在資料夾數上限內就會走完。
     /// </summary>
     public static readonly TimeSpan DefaultTimeBudget = TimeSpan.FromSeconds(10);
 
     /// <summary>掃描達到上限時提示使用者的訊息。</summary>
     public const string TruncatedNotice =
         "專案掃描已達資料夾數或時間上限，清單可能不完整；可用 --project 或 --root 指定專案";
+
+    /// <summary>
+    /// 掃描結果要提示使用者的訊息：達到上限時的 TruncatedNotice，以及無法讀取連結目標而略過的資料夾數。
+    /// 兩者都沒有時回傳空清單。
+    /// </summary>
+    public static IReadOnlyList<string> ScanNotices(ScanResult scan)
+    {
+        var notices = new List<string>();
+        if (scan.Truncated)
+            notices.Add(TruncatedNotice);
+        if (scan.UnreadableLinks > 0)
+            notices.Add($"專案掃描略過 {scan.UnreadableLinks} 個無法讀取連結目標的資料夾，清單可能不完整；可用 --project 或 --root 指定專案");
+        return notices;
+    }
 
     /// <summary>不往下掃描的資料夾名稱；以「.」開頭的資料夾另外一律略過。</summary>
     private static readonly HashSet<string> SkippedFolders = new(StringComparer.OrdinalIgnoreCase)
@@ -61,7 +76,8 @@ public static class ProjectDiscovery
     /// <summary>
     /// 以廣度優先掃描 workingDir 與其子資料夾。workingDir 本身是第 0 層，
     /// 第 maxDepth 層的資料夾仍會檢查，更深的不再進入。無法讀取的資料夾直接略過；
-    /// 連結點與符號連結的資料夾不進入，避免重複列出專案或繞成迴圈；其他 reparse point（例如 OneDrive）照常進入。
+    /// 連結點與符號連結的資料夾不進入，避免重複列出專案或繞成迴圈；其他 reparse point（例如 OneDrive 資料夾）照常進入；
+    /// 無法讀取連結目標的資料夾不進入，並計入 UnreadableLinks。
     /// 檢查的資料夾數達到 maxFolders 或耗時超過 timeBudget（預設 DefaultTimeBudget）時停止，
     /// 回傳已找到的專案並把 Truncated 設為 true；廣度優先讓淺層的專案先被找到。
     /// </summary>
@@ -80,6 +96,7 @@ public static class ProjectDiscovery
         pending.Enqueue((root, 0));
         var visited = 0;
         var truncated = false;
+        var unreadableLinks = 0;
 
         while (pending.Count > 0)
         {
@@ -105,7 +122,7 @@ public static class ProjectDiscovery
 
                 foreach (var subFolder in directory.EnumerateDirectories())
                 {
-                    if (ShouldEnter(subFolder))
+                    if (ShouldEnter(subFolder.Name, subFolder.Attributes, () => subFolder.LinkTarget, () => unreadableLinks++))
                         pending.Enqueue((subFolder.FullName, depth + 1));
                 }
             }
@@ -113,7 +130,7 @@ public static class ProjectDiscovery
         }
 
         SortByPath(results);
-        return new ScanResult(results, truncated);
+        return new ScanResult(results, truncated, unreadableLinks);
     }
 
     /// <summary>
@@ -219,15 +236,17 @@ public static class ProjectDiscovery
         return firstSegment != "..";
     }
 
-    private static bool ShouldEnter(DirectoryInfo folder) =>
-        ShouldEnter(folder.Name, folder.Attributes, () => folder.LinkTarget);
-
     /// <summary>
     /// 掃描是否進入這個子資料夾：略過清單中的名稱、以「.」開頭的資料夾，以及連結點與符號連結。
-    /// 帶有 ReparsePoint 屬性但 linkTarget 回傳 null 的資料夾（例如 OneDrive 同步根目錄與「檔案隨選」資料夾）照常進入；
-    /// 只有帶 ReparsePoint 屬性時才呼叫 linkTarget，讀取連結目標失敗時視為連結而不進入。
+    /// 帶有 ReparsePoint 屬性但 linkTarget 回傳 null 的資料夾（例如 OneDrive 同步根目錄與其下的子資料夾）照常進入；
+    /// 只有帶 ReparsePoint 屬性時才呼叫 linkTarget，讀取連結目標失敗時視為連結而不進入，並呼叫 unreadable。
     /// </summary>
-    public static bool ShouldEnter(string name, FileAttributes attributes, Func<string?> linkTarget)
+    internal static bool ShouldEnter(
+        string name,
+        FileAttributes attributes,
+        Func<string?> linkTarget,
+        Action? unreadable = null
+    )
     {
         if (name.StartsWith('.') || SkippedFolders.Contains(name))
             return false;
@@ -241,6 +260,7 @@ public static class ProjectDiscovery
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            unreadable?.Invoke();
             return false;
         }
     }

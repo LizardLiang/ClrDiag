@@ -109,7 +109,7 @@ public sealed class ProjectStateStore
 
     /// <summary>設定預設專案。回傳是否成功寫入。</summary>
     public bool SetDefault(string workingDir, string projectPath) =>
-        Update(workingDir, s => s with { Default = Path.GetFullPath(projectPath) });
+        SetDefault(workingDir, projectPath, clearLastRun: false);
 
     /// <summary>清除預設專案。回傳是否成功寫入。</summary>
     public bool ClearDefault(string workingDir) => Update(workingDir, s => s with { Default = null });

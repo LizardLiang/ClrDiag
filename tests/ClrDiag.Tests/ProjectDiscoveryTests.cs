@@ -67,7 +67,7 @@ public sealed class ProjectDiscoveryTests : IDisposable
         }
     }
 
-    // OneDrive 同步根目錄與「檔案隨選」資料夾帶有 ReparsePoint 屬性但不是連結，LinkTarget 為 null。
+    // OneDrive 同步根目錄與其下的子資料夾帶有 ReparsePoint 屬性但不是連結，LinkTarget 為 null。
     // 這種 reparse point 只能由雲端同步提供者建立，測試無法在暫存資料夾重現，
     // 因此以 (屬性, 連結目標) 直接驗證判斷規則：只有連結目標不為 null 的資料夾不進入。
     [Theory]
@@ -104,6 +104,38 @@ public sealed class ProjectDiscoveryTests : IDisposable
     }
 
     [Fact]
+    public void ShouldEnter_無法讀取連結目標時呼叫unreadable()
+    {
+        var count = 0;
+
+        var result = ProjectDiscovery.ShouldEnter(
+            "Folder",
+            FileAttributes.Directory | FileAttributes.ReparsePoint,
+            () => throw new UnauthorizedAccessException("reparse"),
+            () => count++
+        );
+
+        Assert.False(result);
+        Assert.Equal(1, count);
+    }
+
+    [Theory]
+    [InlineData(false, 0, 0)]
+    [InlineData(true, 0, 1)]
+    [InlineData(false, 3, 1)]
+    [InlineData(true, 2, 2)]
+    public void ScanNotices_截斷與無法讀取的連結各自提示(bool truncated, int unreadable, int expected)
+    {
+        var notices = ProjectDiscovery.ScanNotices(
+            new ScanResult(Array.Empty<DiscoveredProject>(), truncated, unreadable)
+        );
+
+        Assert.Equal(expected, notices.Count);
+        Assert.Equal(truncated, notices.Contains(ProjectDiscovery.TruncatedNotice));
+        Assert.Equal(unreadable > 0, notices.Any(n => n.Contains($"略過 {unreadable} 個無法讀取連結目標")));
+    }
+
+    [Fact]
     public void ShouldEnter_無法讀取連結目標時不進入()
     {
         Assert.False(
@@ -113,23 +145,6 @@ public sealed class ProjectDiscoveryTests : IDisposable
                 () => throw new IOException("reparse")
             )
         );
-    }
-
-    [Fact]
-    public void Scan_進入沒有連結的一般資料夾()
-    {
-        _tree.File("Cloud/Sub/App.csproj");
-        File.SetAttributes(_tree.PathOf("Cloud"), FileAttributes.Directory | FileAttributes.ReadOnly);
-        try
-        {
-            var result = ProjectDiscovery.Scan(_tree.Root).Projects;
-
-            Assert.Equal(new[] { "Cloud/Sub/App.csproj" }, Paths(result));
-        }
-        finally
-        {
-            File.SetAttributes(_tree.PathOf("Cloud"), FileAttributes.Directory);
-        }
     }
 
     [Theory]

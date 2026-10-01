@@ -31,6 +31,10 @@
   <ItemGroup>
     <None Update="README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
+  <!-- 測試專案（組件名稱 ClrDiag.Tests）可以呼叫 internal 成員，例如 ProjectDiscovery.ShouldEnter。 -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="ClrDiag.Tests" />
+  </ItemGroup>
   <!-- tests/ 是獨立的 xUnit 專案；SDK 預設的萬用字元會把它的原始碼一併編進工具，這裡排除。 -->
   <ItemGroup>
     <Compile Remove="tests/**" />

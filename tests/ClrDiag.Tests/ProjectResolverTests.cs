@@ -32,8 +32,74 @@ public sealed class ProjectResolverTests : IDisposable
         ProjectState? saved = null,
         string? project = null,
         bool pick = false,
-        bool interactive = true
-    ) => ProjectResolver.Resolve(discovered, saved ?? ProjectState.Empty, project, pick, interactive);
+        bool interactive = true,
+        bool ambiguousFallsBackUpward = false
+    ) =>
+        ProjectResolver.Resolve(
+            discovered,
+            saved ?? ProjectState.Empty,
+            project,
+            pick,
+            interactive,
+            ambiguousFallsBackUpward
+        );
+
+    [Fact]
+    public void 允許往上搜尋時非互動模式多個專案沒有記錄改走往上搜尋()
+    {
+        var result = Resolve(All, interactive: false, ambiguousFallsBackUpward: true);
+
+        Assert.IsType<ResolveOutcome.FallBackUpward>(result.Outcome);
+    }
+
+    [Fact]
+    public void 允許往上搜尋時上次執行已失效也改走往上搜尋並標記失效()
+    {
+        var result = Resolve(
+            All,
+            new ProjectState { LastRun = Missing },
+            interactive: false,
+            ambiguousFallsBackUpward: true
+        );
+
+        Assert.IsType<ResolveOutcome.FallBackUpward>(result.Outcome);
+        Assert.True(result.StaleLastRun);
+    }
+
+    [Fact]
+    public void 允許往上搜尋時指定專案沒有符合仍回報錯誤()
+    {
+        var result = Resolve(All, project: "Nope", interactive: false, ambiguousFallsBackUpward: true);
+
+        Assert.IsType<ResolveOutcome.Error>(result.Outcome);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void 允許往上搜尋時有預設或上次執行記錄仍使用該專案(bool useDefault, bool useLastRun)
+    {
+        var saved = new ProjectState
+        {
+            Default = useDefault ? _b.FullPath : null,
+            LastRun = useLastRun ? _web.FullPath : null,
+        };
+
+        var result = Resolve(All, saved, interactive: false, ambiguousFallsBackUpward: true);
+
+        var use = Assert.IsType<ResolveOutcome.Use>(result.Outcome);
+        Assert.Equal(useDefault ? _b : _web, use.Project);
+        Assert.Equal(useDefault ? ProjectSource.Default : ProjectSource.LastRun, use.Source);
+    }
+
+    [Fact]
+    public void 允許往上搜尋時只有一個專案仍直接使用()
+    {
+        var result = Resolve(new[] { _a }, interactive: false, ambiguousFallsBackUpward: true);
+
+        var use = Assert.IsType<ResolveOutcome.Use>(result.Outcome);
+        Assert.Equal(ProjectSource.Single, use.Source);
+    }
 
     [Fact]
     public void 沒有任何專案時改走往上搜尋()

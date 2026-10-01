@@ -66,24 +66,34 @@ Batch commands never show a picker. They resolve the project in this order:
 4. The project last run in the interactive dashboard.
 
 When none of these decides, the tool prints the candidates and exits with code 2.
-Pass `--project` in that case. A blank `--project` value, or a name that matches
-nothing, also exits with code 2. This holds when the scan finds no project too.
+Pass `--project` in that case.
+`--list` is the exception: it searches upward for `clrdiag.json` instead,
+lists processes as usual, and prints a "multiple projects" notice to stderr.
+A blank `--project` value, or a name that matches
+nothing, also exits with code 2, with `--list` too. This holds when the scan finds no project too.
 When the scan finds nothing and no `--project` is given, the tool searches
 upward for `clrdiag.json` as before. The chosen project folder is the root, unless
 a `clrdiag.json` above it sets the root. `--root <path>` and `--config <path>`
 skip the scan. `--root` also sets the project root that derives the debug pipe name.
 `--init`, `--install-skill`, and `--output` also skip the scan. A warning
 names any flag that has no effect in the given combination.
-The scan skips junctions and symbolic links. It enters OneDrive folders, which carry
-a reparse point but are not links. It stops after 20,000 folders
-(or after 10 seconds on a slow network drive) and prints a notice.
+The scan skips junctions and symbolic links. It enters the OneDrive sync root and
+its subfolders, which carry a reparse point but are not links. It skips folders
+whose link target it cannot read, and prints how many it skipped.
+It stops after 20,000 folders, or after 10 seconds, and prints a notice.
+A slow network drive or OneDrive cloud-only folders can use up the 10 seconds.
 Pass `--project` or `--root` when you see that notice.
 In batch commands, warnings and notices go to stderr as plain text.
 Stdout holds only the command result, so `--pipe-name` prints only the pipe name.
 A `--project` or `--set-default` miss prints its error and candidates to stderr.
 A failed record write and an empty `--projects` result also go to stderr.
 Exit codes do not change. The `--projects` table stays on stdout.
-In batch commands, stdout and stderr are UTF-8 without a BOM.
+Argument errors (unknown flag, missing `--project` or `--set-default` value,
+bad `--install-skill` scope) and a failed `clrdiag.json` load go to stderr with exit code 2.
+Stdout and stderr are UTF-8 without a BOM for every non-interactive flag:
+`--snapshot`, `--threads`, `--roots`, `--render`, `--output`, `--dap`, `--list`,
+`--init`, `--build`, `--export`, `--send`, `--pipe-name`, `--install-skill`,
+`--projects`, `--set-default`, `--clear-default`. Argument errors are UTF-8 too.
 Run `clrdiag --projects` to see the projects found, with the default (`★ 預設`)
 and last-run (`◎ 上次`) markers.
 

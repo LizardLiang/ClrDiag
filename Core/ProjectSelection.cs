@@ -5,7 +5,8 @@ public sealed record ProjectPick(DiscoveredProject Project, bool SetAsDefault);
 
 /// <summary>
 /// 啟動前專案選擇的結果。ExitCode 不為 null 時呼叫端以這個結束碼結束（Error 不為 null 時先印出它）；
-/// ExitCode 為 null 且 Project 為 null 表示工作目錄底下沒有專案，改走往上搜尋專案根目錄。
+/// ExitCode 為 null 且 Project 為 null 表示改走往上搜尋專案根目錄：工作目錄底下沒有專案，
+/// 或 --list 遇到多個專案且沒有記錄。
 /// </summary>
 public sealed record ProjectSelectionResult(
     DiscoveredProject? Project,
@@ -78,10 +79,16 @@ public static class ProjectSelection
         return warnings;
     }
 
+    /// <summary>--list 遇到多個專案且沒有記錄時，改用往上搜尋的專案根目錄並以這段文字提示使用者。</summary>
+    public const string AmbiguousListNotice =
+        "找到多個專案，--list 改用往上搜尋得到的專案根目錄設定；可用 --project 指定專案";
+
     /// <summary>
     /// 掃描工作目錄並決定要用的專案。必要時呼叫 prompt 顯示選單，prompt 回傳 null 代表使用者取消。
     /// interactive 且選定了專案時，才移除已失效的記錄並在使用者同意時寫入預設專案；
     /// 取消、錯誤與批次模式不寫入狀態檔。
+    /// ambiguousFallsBackUpward 為 true（--list）時，批次模式遇到多個專案且沒有記錄不回報錯誤，
+    /// 改走往上搜尋專案根目錄並提示 AmbiguousListNotice。
     /// 掃描達到上限、記錄寫入失敗、使用者取消等非致命訊息交給 notice 輸出。
     /// </summary>
     public static ProjectSelectionResult Resolve(
@@ -91,29 +98,35 @@ public static class ProjectSelection
         bool pick,
         bool interactive,
         Func<IReadOnlyList<DiscoveredProject>, DiscoveredProject?, ProjectState, ProjectPick?> prompt,
-        Action<string> notice
+        Action<string> notice,
+        bool ambiguousFallsBackUpward = false
     )
     {
         ScanResult scan = ProjectDiscovery.Scan(workingDir);
         ProjectState saved = store.Get(workingDir);
         IReadOnlyList<DiscoveredProject> discovered = scan.Projects;
+        foreach (string message in ProjectDiscovery.ScanNotices(scan))
+            notice(message);
         if (scan.Truncated)
-        {
-            notice(ProjectDiscovery.TruncatedNotice);
             discovered = ProjectDiscovery.IncludeSaved(discovered, workingDir, saved);
-        }
 
-        ProjectResolution resolution = ProjectResolver.Resolve(discovered, saved, projectQuery, pick, interactive);
-        void ClearStale() => ClearStaleRecords(store, workingDir, resolution, interactive, notice);
+        ProjectResolution resolution = ProjectResolver.Resolve(
+            discovered,
+            saved,
+            projectQuery,
+            pick,
+            interactive,
+            ambiguousFallsBackUpward
+        );
 
         switch (resolution.Outcome)
         {
             case ResolveOutcome.Use use:
-                ClearStale();
+                ClearStaleRecords(store, workingDir, resolution, interactive, notice);
                 return new ProjectSelectionResult(use.Project, SourceLabel(use.Source), null, null);
 
             case ResolveOutcome.Prompt choose:
-                return RunPrompt(store, workingDir, choose, saved, prompt, resolution, ClearStale, notice);
+                return RunPrompt(store, workingDir, choose, saved, prompt, resolution, notice);
 
             case ResolveOutcome.Error error:
                 return new ProjectSelectionResult(
@@ -124,13 +137,16 @@ public static class ProjectSelection
                 );
 
             default:
+                if (discovered.Count > 0)
+                    notice(AmbiguousListNotice);
                 return new ProjectSelectionResult(null, null, null, null);
         }
     }
 
     /// <summary>
     /// 顯示選單並處理結果：取消時不寫入任何記錄。使用者同意設為預設時，以一次寫入設定預設專案
-    /// 並移除已失效的上次執行記錄（已失效的預設由新的預設取代）；否則呼叫 clearStale 移除已失效的記錄。
+    /// 並移除已失效的上次執行記錄（已失效的預設由新的預設取代）；否則移除 resolution 標記的已失效記錄。
+    /// 選單只在互動模式出現，因此這裡的寫入都以互動模式處理。
     /// </summary>
     private static ProjectSelectionResult RunPrompt(
         ProjectStateStore store,
@@ -139,7 +155,6 @@ public static class ProjectSelection
         ProjectState saved,
         Func<IReadOnlyList<DiscoveredProject>, DiscoveredProject?, ProjectState, ProjectPick?> prompt,
         ProjectResolution resolution,
-        Action clearStale,
         Action<string> notice
     )
     {
@@ -152,7 +167,7 @@ public static class ProjectSelection
 
         if (!picked.SetAsDefault)
         {
-            clearStale();
+            ClearStaleRecords(store, workingDir, resolution, interactive: true, notice);
             return new ProjectSelectionResult(picked.Project, "選單", null, null);
         }
 
