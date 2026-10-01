@@ -148,6 +148,8 @@ public static class ProjectDiscovery
                         case FolderEntry.UnreadableLink:
                             unreadableLinks++;
                             break;
+                        case FolderEntry.Skip:
+                            break;
                     }
                 }
             }

@@ -534,7 +534,13 @@ static void UseUtf8Output()
     {
         Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
     }
-    catch (Exception ex) when (ex is IOException or PlatformNotSupportedException or System.Security.SecurityException)
+    catch (Exception ex)
+        when (ex
+                is IOException
+                    or UnauthorizedAccessException
+                    or PlatformNotSupportedException
+                    or System.Security.SecurityException
+        )
     { }
 }
 
