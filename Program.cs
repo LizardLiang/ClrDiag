@@ -35,6 +35,11 @@ string? buildConfiguration = null;
 int renderWidth = 120;
 int renderHeight = 40;
 string? rootsType = null;
+string? projectQuery = null;
+bool pickMode = false;
+bool projectsMode = false;
+string? setDefaultQuery = null;
+bool clearDefaultMode = false;
 
 for (int i = 0; i < args.Length; i++)
 {
@@ -55,6 +60,21 @@ for (int i = 0; i < args.Length; i++)
             break;
         case "--config" when i + 1 < args.Length:
             configPath = args[++i];
+            break;
+        case "--project" when i + 1 < args.Length:
+            projectQuery = args[++i];
+            break;
+        case "--pick":
+            pickMode = true;
+            break;
+        case "--projects":
+            projectsMode = true;
+            break;
+        case "--set-default" when i + 1 < args.Length:
+            setDefaultQuery = args[++i];
+            break;
+        case "--clear-default":
+            clearDefaultMode = true;
             break;
         case "--snapshot":
             snapshotMode = true;
@@ -149,15 +169,91 @@ if (installSkillMode && skillScope is null)
 // 之前設定——包括下面 DiagConfig.Load 失敗時的錯誤訊息——Spectre 的 Profile 是第一次使用時
 // 惰性建立並快取，事後才改字碼頁不會讓已經印出的內容或已快取的判斷跟著變。
 bool batchOutputMode = dapMode || snapshotMode || threadMode || rootsType is not null || renderMode || outputMode;
-if (batchOutputMode)
+bool projectCommandMode = projectsMode || setDefaultQuery is not null || clearDefaultMode;
+if (batchOutputMode || projectCommandMode)
 {
     Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+}
+
+// 專案自動偵測：往下掃描工作目錄的 .sln / .csproj，記錄存在 %LOCALAPPDATA%\clrdiag\projects.json，
+// 以工作目錄為鍵。--projects / --set-default / --clear-default 只管理這份記錄，做完就結束。
+string workingDir = Directory.GetCurrentDirectory();
+var projectStore = new ProjectStateStore(ProjectStateStore.DefaultPath);
+
+if (projectCommandMode)
+{
+    return RunProjectCommand(projectStore, workingDir, projectsMode, setDefaultQuery, clearDefaultMode);
+}
+
+// 互動 = 沒有任何批次旗標，且輸入輸出都接在真正的主控台上；只有互動時才會顯示選單、寫入記錄。
+bool interactive =
+    !batchOutputMode
+    && !listMode
+    && !initMode
+    && !buildMode
+    && !exportMode
+    && sendCommand is null
+    && !pipeNameMode
+    && !installSkillMode
+    && !Console.IsInputRedirected
+    && !Console.IsOutputRedirected;
+
+// --output 與 --install-skill global 不讀任何專案設定，維持原本往上搜尋的行為。
+bool usesProject = !outputMode && skillScope != SkillScope.Global;
+
+DiscoveredProject? chosenProject = null;
+string? chosenProjectLabel = null;
+if (root is null && configPath is null && usesProject)
+{
+    IReadOnlyList<DiscoveredProject> discovered = ProjectDiscovery.Scan(workingDir);
+    ProjectState saved = projectStore.Get(workingDir);
+    ProjectResolution resolution = ProjectResolver.Resolve(
+        discovered,
+        saved,
+        projectQuery,
+        pickMode,
+        interactive
+    );
+
+    // 已不存在的記錄只在互動模式清除；批次模式只讀不寫。
+    if (interactive && resolution.StaleDefault)
+    {
+        projectStore.ClearDefault(workingDir);
+    }
+
+    if (interactive && resolution.StaleLastRun)
+    {
+        projectStore.ClearLastRun(workingDir);
+    }
+
+    switch (resolution.Outcome)
+    {
+        case ResolveOutcome.Use use:
+            chosenProject = use.Project;
+            chosenProjectLabel = ProjectSourceLabel(use.Source);
+            break;
+        case ResolveOutcome.Prompt prompt:
+            ProjectPick pick = ProjectPicker.Pick(prompt.Projects, prompt.Preselect, saved);
+            chosenProject = pick.Project;
+            chosenProjectLabel = "選單";
+            if (pick.SetAsDefault)
+            {
+                chosenProjectLabel = projectStore.SetDefault(workingDir, pick.Project.FullPath)
+                    ? "選單，已設為預設"
+                    : "選單，預設專案寫入失敗";
+            }
+
+            break;
+        case ResolveOutcome.Error error:
+            PrintProjectCandidates(error.Message, error.Candidates);
+            return 2;
+    }
 }
 
 DiagConfig config;
 try
 {
-    config = DiagConfig.Load(configPath, root);
+    config = DiagConfig.Load(configPath, root, chosenProject?.FullPath);
 }
 catch (Exception ex)
 {
@@ -301,7 +397,19 @@ if (Console.IsOutputRedirected)
     return 2;
 }
 
-using var app = new DiagApp(config, effectivePort);
+// 記住這次在互動儀表板執行的專案；--root / --config 的執行沒有經過偵測，不寫入記錄。
+string? startupStatus = null;
+if (chosenProject is not null)
+{
+    if (interactive)
+    {
+        projectStore.SetLastRun(workingDir, chosenProject.FullPath);
+    }
+
+    startupStatus = $"專案: {chosenProject.RelativePath}（{chosenProjectLabel}）";
+}
+
+using var app = new DiagApp(config, effectivePort, startupStatus);
 
 // 攔截 Ctrl+C 走一般的收尾流程（斷開除錯階段、砍掉 netcoredbg），而不是讓執行階段直接強制結束——
 // 同 RunOutput 的教訓，直接讓行程被砍掉會跳過 DiagApp.Dispose，留下孤兒的 netcoredbg 子行程。
@@ -368,6 +476,107 @@ static int? ResolveTarget(DiagConfig config, int? pid)
         "請先啟動要診斷的應用程式，或以 [bold]--pid[/] 指定；[bold]--list[/] 可列出候選行程"
     );
     return null;
+}
+
+/// <summary>啟動訊息中說明專案來源的文字。</summary>
+static string ProjectSourceLabel(ProjectSource source) =>
+    source switch
+    {
+        ProjectSource.Explicit => "--project",
+        ProjectSource.Default => "預設",
+        ProjectSource.Single => "唯一專案",
+        ProjectSource.LastRun => "上次執行",
+        _ => source.ToString(),
+    };
+
+/// <summary>印出錯誤訊息與候選專案的相對路徑。</summary>
+static void PrintProjectCandidates(string message, IReadOnlyList<DiscoveredProject> candidates)
+{
+    AnsiConsole.MarkupLine($"[red]{Markup.Escape(message)}[/]");
+    foreach (DiscoveredProject candidate in candidates)
+    {
+        AnsiConsole.MarkupLine($"  {Markup.Escape(candidate.RelativePath)}");
+    }
+}
+
+/// <summary>
+/// --clear-default、--set-default、--projects：管理工作目錄的預設專案並列出偵測到的專案。
+/// 多個旗標一起使用時依清除 → 設定 → 列出的順序執行。
+/// </summary>
+static int RunProjectCommand(
+    ProjectStateStore store,
+    string workingDir,
+    bool list,
+    string? setDefaultQuery,
+    bool clearDefault
+)
+{
+    if (clearDefault)
+    {
+        if (!store.ClearDefault(workingDir))
+        {
+            AnsiConsole.MarkupLine($"[red]無法寫入專案記錄:[/] {Markup.Escape(ProjectStateStore.DefaultPath)}");
+            return 1;
+        }
+
+        AnsiConsole.MarkupLine("已清除預設專案");
+    }
+
+    if (setDefaultQuery is null && !list)
+    {
+        return 0;
+    }
+
+    IReadOnlyList<DiscoveredProject> discovered = ProjectDiscovery.Scan(workingDir);
+
+    if (setDefaultQuery is not null)
+    {
+        MatchResult match = ProjectDiscovery.Match(discovered, setDefaultQuery);
+        if (match.Hit is null)
+        {
+            PrintProjectCandidates(
+                match.Candidates.Count > 1
+                    ? $"「{setDefaultQuery}」符合多個專案，請指定更完整的路徑"
+                    : $"找不到符合「{setDefaultQuery}」的專案",
+                match.Candidates.Count > 1 ? match.Candidates : discovered
+            );
+            return 2;
+        }
+
+        if (!store.SetDefault(workingDir, match.Hit.FullPath))
+        {
+            AnsiConsole.MarkupLine($"[red]無法寫入專案記錄:[/] {Markup.Escape(ProjectStateStore.DefaultPath)}");
+            return 1;
+        }
+
+        AnsiConsole.MarkupLine($"預設專案: {Markup.Escape(match.Hit.RelativePath)}");
+    }
+
+    if (!list)
+    {
+        return 0;
+    }
+
+    if (discovered.Count == 0)
+    {
+        AnsiConsole.MarkupLine("[red]找不到任何 .sln / .csproj[/]");
+        return 1;
+    }
+
+    ProjectState saved = store.Get(workingDir);
+    var table = new Table().Border(TableBorder.Simple);
+    table.AddColumn("專案");
+    table.AddColumn("標記");
+    foreach (DiscoveredProject project in discovered)
+    {
+        table.AddRow(
+            Markup.Escape(project.RelativePath),
+            Markup.Escape(ProjectPicker.Markers(project, saved))
+        );
+    }
+
+    AnsiConsole.Write(table);
+    return 0;
 }
 
 /// <summary>列出可監看的受控行程，方便挑 PID。</summary>
@@ -841,7 +1050,18 @@ static void PrintHelp()
           clrdiag --install-skill       安裝 Claude Code 技能（後接 global 或 local）
           clrdiag --force               搭配 --install-skill：安裝位置已有真實目錄時覆寫它
           clrdiag --config <path>       指定設定檔
-          clrdiag --root <path>         指定專案根目錄
+          clrdiag --root <path>         指定專案根目錄（不做專案自動偵測）
+          clrdiag --project <名稱>      以名稱或相對路徑指定工作目錄底下的專案
+          clrdiag --pick                不使用預設專案，一律顯示專案選單
+          clrdiag --projects            列出工作目錄底下偵測到的專案（★ 預設、↺ 上次）
+          clrdiag --set-default <名稱>  設定這個工作目錄的預設專案
+          clrdiag --clear-default       清除這個工作目錄的預設專案
+
+        專案自動偵測
+          沒有 --root / --config 時，往下掃描工作目錄（深度 5）的 .sln / .slnx / .csproj / .vbproj。
+          決定順序：--project → --pick（選單）→ 預設專案 → 只有一個專案 → 選單（上次執行排第一）。
+          批次模式不顯示選單，沿用上次執行的專案；仍無法決定時列出候選並以結束碼 2 結束。
+          記錄存在 %LOCALAPPDATA%\clrdiag\projects.json，以工作目錄為鍵。
 
         設定檔
           在專案根目錄放 clrdiag.json（會從目前目錄往上尋找）即可設定建置指令、

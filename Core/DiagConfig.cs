@@ -149,11 +149,23 @@ public sealed record DiagConfig
 
     /// <summary>
     /// 載入設定：先從 explicitConfig 或往上尋找 clrdiag.json，找不到就純自動偵測。
+    /// explicitBuildProject 是從工作目錄掃描選定的方案檔或專案檔：往上尋找 clrdiag.json 改從它的資料夾開始，
+    /// 沒有設定檔時 Root 就是它的資料夾；設定檔沒有指定 buildProject 時，建置目標就是這個檔案。
+    /// 找到設定檔時 Root 仍是設定檔所在資料夾，設定檔內的相對路徑才會對齊。
     /// </summary>
-    public static DiagConfig Load(string? explicitConfig, string? explicitRoot)
+    public static DiagConfig Load(
+        string? explicitConfig,
+        string? explicitRoot,
+        string? explicitBuildProject = null
+    )
     {
-        string? configFile =
-            explicitConfig ?? FindConfigFile(explicitRoot ?? Directory.GetCurrentDirectory());
+        string? projectFile = explicitBuildProject is null
+            ? null
+            : Path.GetFullPath(explicitBuildProject);
+        string? projectFolder = projectFile is null ? null : Path.GetDirectoryName(projectFile);
+        string searchStart = explicitRoot ?? projectFolder ?? Directory.GetCurrentDirectory();
+
+        string? configFile = explicitConfig ?? FindConfigFile(searchStart);
         DiagConfig config;
 
         if (configFile is not null)
@@ -172,8 +184,13 @@ public sealed record DiagConfig
         {
             config = new DiagConfig
             {
-                Root = explicitRoot ?? FindProjectRoot(Directory.GetCurrentDirectory()),
+                Root = explicitRoot ?? projectFolder ?? FindProjectRoot(Directory.GetCurrentDirectory()),
             };
+        }
+
+        if (projectFile is not null && config.BuildProject is null)
+        {
+            config = config with { BuildProject = projectFile };
         }
 
         config.ResolveBuildTarget();
