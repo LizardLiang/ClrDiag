@@ -66,11 +66,22 @@ Batch commands never show a picker. They resolve the project in this order:
 4. The project last run in the interactive dashboard.
 
 When none of these decides, the tool prints the candidates and exits with code 2.
-Pass `--project` in that case. When the scan finds nothing, the tool searches
+Pass `--project` in that case. A blank `--project` value, or a name that matches
+nothing, also exits with code 2. This holds when the scan finds no project too.
+When the scan finds nothing and no `--project` is given, the tool searches
 upward for `clrdiag.json` as before. The chosen project folder is the root, unless
 a `clrdiag.json` above it sets the root. `--root <path>` and `--config <path>`
 skip the scan. `--root` also sets the project root that derives the debug pipe name.
-Run `clrdiag --projects` to see the projects found, with the default and last-run markers.
+`--init`, `--install-skill`, and `--output` also skip the scan. A yellow warning
+names any flag that has no effect in the given combination.
+The scan stops after 20,000 folders or 2 seconds and prints a yellow notice.
+Pass `--project` or `--root` when you see that notice.
+Run `clrdiag --projects` to see the projects found, with the default (`★ 預設`)
+and last-run (`◎ 上次`) markers.
+
+**Known limitation.** Batch commands prefer the saved default over the last run.
+Suppose the default is project A and the dashboard was started on B with `--pick`.
+Then `clrdiag --send` targets A's pipe. Pass `--project B` in that case.
 
 ## 1. Build and serve
 
@@ -349,8 +360,8 @@ holds a debug session on the same process.
 | `--port` | `N` | none | Override the config port for the probe and placeholders. |
 | `--root` | `path` | none | Set the project root for config search and pipe name. |
 | `--config` | `path` | none | Point at an explicit clrdiag.json. |
-| `--project` | `name` | Exit 2 with candidates on no unique match. | Any command, when the directory holds more than one project. |
-| `--projects` | none | Projects found below the directory, with default and last-run markers. Exit 1 if none. | Before `--project`, to see the names. |
+| `--project` | `name` | Exit 2 with candidates on a blank value or no unique match. | Any command, when the directory holds more than one project. |
+| `--projects` | none | Projects found below the directory, with `★ 預設` and `◎ 上次` markers. Exit 1 if none. | Before `--project`, to see the names. |
 | `--set-default` | `name` | The new default. Exit 2 with candidates on no unique match. | Pin the project for later runs in this directory. |
 | `--clear-default` | none | Confirmation line. | Remove the saved default. |
 | `--snapshot` | none | Header, totals, and a type histogram. | Memory leak hunt, step 1 and step 3. |
