@@ -83,9 +83,11 @@ public sealed partial class DiagApp : IDisposable
     private Task? backgroundWork;
     private DateTime lastProbe = DateTime.MinValue;
 
-    public DiagApp(DiagConfig config, int port)
+    /// <summary>startupStatus 是啟動時狀態列顯示的訊息，例如選定的專案；null 時顯示「就緒」。</summary>
+    public DiagApp(DiagConfig config, int port, string? startupStatus = null)
     {
         this.config = config;
+        status = startupStatus ?? status;
         build = new BuildService(config, log);
         server = new ServerService(config, log, port);
         snapshots = new HeapSnapshotService(config.AppNamespaces);

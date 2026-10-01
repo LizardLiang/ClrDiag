@@ -35,6 +35,11 @@ string? buildConfiguration = null;
 int renderWidth = 120;
 int renderHeight = 40;
 string? rootsType = null;
+string? projectQuery = null;
+bool pickMode = false;
+bool projectsMode = false;
+string? setDefaultQuery = null;
+bool clearDefaultMode = false;
 
 for (int i = 0; i < args.Length; i++)
 {
@@ -55,6 +60,31 @@ for (int i = 0; i < args.Length; i++)
             break;
         case "--config" when i + 1 < args.Length:
             configPath = args[++i];
+            break;
+        case "--project":
+            projectQuery = TakeValue(args, ref i);
+            if (projectQuery is null)
+            {
+                return MissingValue("--project");
+            }
+
+            break;
+        case "--pick":
+            pickMode = true;
+            break;
+        case "--projects":
+            projectsMode = true;
+            break;
+        case "--set-default":
+            setDefaultQuery = TakeValue(args, ref i);
+            if (setDefaultQuery is null)
+            {
+                return MissingValue("--set-default");
+            }
+
+            break;
+        case "--clear-default":
+            clearDefaultMode = true;
             break;
         case "--snapshot":
             snapshotMode = true;
@@ -93,23 +123,15 @@ for (int i = 0; i < args.Length; i++)
             installSkillMode = true;
             // 範圍是必填；這裡先收下值，缺漏或拼錯留到迴圈後統一報錯，
             // 才能印出這個旗標自己的用法而不是整份說明
-            if (i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
-            {
-                installSkillScope = args[++i];
-            }
-
+            installSkillScope = TakeValue(args, ref i);
             break;
         case "--force":
             force = true;
             break;
         case "--build":
             buildMode = true;
-            // 後面若不是另一個參數，就當成建置設定名稱（--build Release）
-            if (i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
-            {
-                buildConfiguration = args[++i];
-            }
-
+            // 建置設定名稱可省略；後面若不是另一個參數，就當成建置設定名稱（--build Release）
+            buildConfiguration = TakeValue(args, ref i);
             break;
         case "--width" when i + 1 < args.Length:
             renderWidth = int.Parse(args[++i]);
@@ -119,12 +141,16 @@ for (int i = 0; i < args.Length; i++)
             break;
         case "--help":
         case "-h":
-            PrintHelp();
+            // 印到終端機時沿用主控台字碼頁；標準輸出重新導向到檔案或管線時與參數錯誤一樣改用 UTF-8
+            if (Console.IsOutputRedirected)
+            {
+                UseUtf8Output();
+            }
+
+            PrintHelp(Console.Out);
             return 0;
         default:
-            AnsiConsole.MarkupLine($"[red]未知參數:[/] {Markup.Escape(arg)}");
-            PrintHelp();
-            return 2;
+            return ArgumentError($"[red]未知參數:[/] {Markup.Escape(arg)}", PrintHelp);
     }
 }
 
@@ -133,35 +159,120 @@ for (int i = 0; i < args.Length; i++)
 SkillScope? skillScope = SkillInstaller.ParseScope(installSkillScope);
 if (installSkillMode && skillScope is null)
 {
-    AnsiConsole.MarkupLine(
+    return ArgumentError(
         installSkillScope is null
             ? "[red]--install-skill 需要指定範圍（global 或 local）[/]"
-            : $"[red]--install-skill 的範圍只能是 global 或 local:[/] {Markup.Escape(installSkillScope)}"
+            : $"[red]--install-skill 的範圍只能是 global 或 local:[/] {Markup.Escape(installSkillScope)}",
+        SkillInstaller.PrintUsage
     );
-    SkillInstaller.PrintUsage();
-    return 2;
 }
 
-// 這幾個非互動批次模式（設計上就是給重新導向到檔案／管線，或代理程式讀取用）必須輸出 UTF-8：
+// 所有非互動模式（設計上就是給重新導向到檔案／管線，或代理程式讀取用）的標準輸出與標準錯誤都是 UTF-8：
 // 不主動設定的話 Console 會沿用作業系統目前的主控台字碼頁（繁體中文 Windows 預設是 Big5 950），
-// 寫進檔案後任何用 UTF-8 讀取的消費端（例如本檔案）看到的都是亂碼。互動式儀表板刻意不套用這段，
-// 免得動到 Spectre.Console 畫框線／版面時的終端機能力偵測。一定要搶在第一次呼叫 AnsiConsole
-// 之前設定——包括下面 DiagConfig.Load 失敗時的錯誤訊息——Spectre 的 Profile 是第一次使用時
-// 惰性建立並快取，事後才改字碼頁不會讓已經印出的內容或已快取的判斷跟著變。
+// 寫進檔案後任何用 UTF-8 讀取的消費端（例如本檔案）看到的都是亂碼。互動式儀表板不套用這段，
+// 免得動到 Spectre.Console 畫框線／版面時的終端機能力偵測。上面的參數錯誤在 ArgumentError 裡
+// 自行切換成 UTF-8 再印出；除此之外，這段設定位於第一次使用 AnsiConsole 之前——包括下面
+// DiagConfig.Load 失敗時的錯誤訊息——Spectre 的 Profile 是第一次使用時惰性建立並快取，
+// 事後才改字碼頁不會讓已經印出的內容或已快取的判斷跟著變。
 bool batchOutputMode = dapMode || snapshotMode || threadMode || rootsType is not null || renderMode || outputMode;
-if (batchOutputMode)
+bool projectCommandMode = projectsMode || setDefaultQuery is not null || clearDefaultMode;
+bool nonInteractiveFlag =
+    batchOutputMode
+    || projectCommandMode
+    || listMode
+    || initMode
+    || buildMode
+    || exportMode
+    || sendCommand is not null
+    || pipeNameMode
+    || installSkillMode;
+if (nonInteractiveFlag)
 {
-    Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+    UseUtf8Output();
+}
+
+// 專案自動偵測：往下掃描工作目錄的 .sln / .csproj，記錄存在 %LOCALAPPDATA%\clrdiag\projects.json，
+// 以工作目錄為鍵。--projects / --set-default / --clear-default 只管理這份記錄，做完就結束。
+string workingDir = Directory.GetCurrentDirectory();
+var projectStore = new ProjectStateStore(ProjectStateStore.DefaultPath);
+bool explicitRoot = root is not null || configPath is not null;
+
+// --output、--init 與 --install-skill 不掃描工作目錄：--output 不讀專案設定，
+// --init 與 --install-skill 寫入往上搜尋得到的專案根目錄。
+bool usesDiscovery = ProjectSelection.UsesDiscovery(outputMode, initMode, skillScope is not null);
+
+// 互動 = 沒有任何批次旗標或專案管理指令、輸入輸出都接在真正的主控台上，且 Spectre 判斷終端機可互動；
+// 只有互動時才會顯示選單、寫入記錄；不可互動時與批次模式一樣解析專案。
+// AnsiConsole.Profile 在上面的 UTF-8 設定之後才第一次讀取。
+bool interactive = ProjectSelection.IsInteractive(
+    nonInteractiveFlag,
+    Console.IsInputRedirected,
+    Console.IsOutputRedirected,
+    () => AnsiConsole.Profile.Capabilities.Interactive
+);
+
+// 提示訊息：互動模式以黃色印在主控台；非互動模式以純文字寫到標準錯誤，標準輸出只留給批次結果
+// （例如 --pipe-name 的第一行就是管道名稱，編輯器外掛直接讀取）。
+var notices = new NoticeWriter(
+    interactive,
+    Console.Error,
+    message => AnsiConsole.MarkupLine($"[yellow]{Markup.Escape(message)}[/]")
+);
+
+foreach (
+    string warning in ProjectSelection.ConflictWarnings(
+        explicitRoot,
+        projectQuery is not null || pickMode,
+        projectCommandMode,
+        usesDiscovery
+    )
+)
+{
+    notices.Write(warning);
+}
+
+if (projectCommandMode)
+{
+    return RunProjectCommand(projectStore, workingDir, projectsMode, setDefaultQuery, clearDefaultMode, notices);
+}
+
+DiscoveredProject? chosenProject = null;
+string? chosenProjectLabel = null;
+if (!explicitRoot && usesDiscovery)
+{
+    ProjectSelectionResult selection = ProjectSelection.Resolve(
+        projectStore,
+        workingDir,
+        projectQuery,
+        pickMode,
+        interactive,
+        ProjectPicker.Pick,
+        notices.Write,
+        listMode ? AmbiguityPolicy.FallBackUpward : AmbiguityPolicy.Error
+    );
+
+    if (selection.Error is { } miss)
+    {
+        PrintProjectCandidates(miss);
+    }
+
+    if (selection.ExitCode is { } exitCode)
+    {
+        return exitCode;
+    }
+
+    chosenProject = selection.Project;
+    chosenProjectLabel = selection.Label;
 }
 
 DiagConfig config;
 try
 {
-    config = DiagConfig.Load(configPath, root);
+    config = DiagConfig.Load(configPath, root, chosenProject?.FullPath);
 }
 catch (Exception ex)
 {
-    AnsiConsole.MarkupLine($"[red]設定載入失敗:[/] {Markup.Escape(ex.Message)}");
+    StandardError().MarkupLine($"[red]設定載入失敗:[/] {Markup.Escape(ex.Message)}");
     return 2;
 }
 
@@ -301,7 +412,19 @@ if (Console.IsOutputRedirected)
     return 2;
 }
 
-using var app = new DiagApp(config, effectivePort);
+// 記住這次在互動儀表板執行的專案；--root / --config 的執行沒有經過偵測，不寫入記錄。
+string? startupStatus = null;
+if (chosenProject is not null)
+{
+    if (interactive && !projectStore.SetLastRun(workingDir, chosenProject.FullPath))
+    {
+        notices.Write(projectStore.WriteFailureMessage);
+    }
+
+    startupStatus = ProjectSelection.StartupStatus(chosenProject, chosenProjectLabel, config, workingDir);
+}
+
+using var app = new DiagApp(config, effectivePort, startupStatus);
 
 // 攔截 Ctrl+C 走一般的收尾流程（斷開除錯階段、砍掉 netcoredbg），而不是讓執行階段直接強制結束——
 // 同 RunOutput 的教訓，直接讓行程被砍掉會跳過 DiagApp.Dispose，留下孤兒的 netcoredbg 子行程。
@@ -368,6 +491,184 @@ static int? ResolveTarget(DiagConfig config, int? pid)
         "請先啟動要診斷的應用程式，或以 [bold]--pid[/] 指定；[bold]--list[/] 可列出候選行程"
     );
     return null;
+}
+
+/// <summary>
+/// 取出旗標後面的值並把 i 前移；沒有下一個參數或下一個參數是另一個旗標（-- 開頭）時回傳 null，i 不變。
+/// 值是否必填由呼叫端決定：--project / --set-default 以 MissingValue 報錯，
+/// --build 的建置設定名稱可省略，--install-skill 的範圍缺漏時印出自己的用法。
+/// </summary>
+static string? TakeValue(string[] args, ref int i)
+{
+    if (i + 1 >= args.Length || args[i + 1].StartsWith("--", StringComparison.Ordinal))
+    {
+        return null;
+    }
+
+    return args[++i];
+}
+
+/// <summary>旗標缺少值時的錯誤訊息，結束碼與未知參數相同。</summary>
+static int MissingValue(string flag) =>
+    ArgumentError($"[red]{Markup.Escape(flag)} 需要專案名稱或相對路徑[/]", usage: null);
+
+/// <summary>
+/// 參數錯誤：先把輸出切換成 UTF-8，再於標準錯誤印出錯誤訊息與用法（usage 為 null 時只印訊息），回傳結束碼 2。
+/// 參數錯誤一律不啟動儀表板，因此與批次模式一樣使用 UTF-8；標準輸出不寫入任何內容。
+/// </summary>
+static int ArgumentError(string markup, Action<TextWriter>? usage)
+{
+    UseUtf8Output();
+    StandardError().MarkupLine(markup);
+    usage?.Invoke(Console.Error);
+    return 2;
+}
+
+/// <summary>
+/// 標準輸出與標準錯誤改用不含 BOM 的 UTF-8；Console 會依新的編碼重建兩個串流。
+/// 沒有附加主控台等情況下設定會擲出例外，這時沿用原本的編碼繼續執行。
+/// </summary>
+static void UseUtf8Output()
+{
+    try
+    {
+        Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+    }
+    catch (Exception ex)
+        when (ex
+                is IOException
+                    or UnauthorizedAccessException
+                    or PlatformNotSupportedException
+                    or System.Security.SecurityException
+        )
+    { }
+}
+
+/// <summary>
+/// 寫到標準錯誤的 Spectre 主控台：專案比對失敗與專案管理指令的錯誤訊息寫在這裡，標準輸出只留給結果。
+/// 標準錯誤接在終端機上時保留顏色，重新導向時輸出純文字。
+/// </summary>
+static IAnsiConsole StandardError() =>
+    AnsiConsole.Create(new AnsiConsoleSettings { Out = new AnsiConsoleOutput(Console.Error) });
+
+/// <summary>在標準錯誤印出比對失敗的訊息與候選專案的相對路徑；沒有候選時說明工作目錄底下沒有專案。</summary>
+static void PrintProjectCandidates(ProjectMiss miss)
+{
+    IAnsiConsole error = StandardError();
+    error.MarkupLine($"[red]{Markup.Escape(miss.Message)}[/]");
+    if (miss.Candidates.Count == 0)
+    {
+        error.MarkupLine($"  （工作目錄底下沒有偵測到任何 {Markup.Escape(ProjectDiscovery.ExtensionList)}）");
+        return;
+    }
+
+    foreach (DiscoveredProject candidate in miss.Candidates)
+    {
+        error.MarkupLine($"  {Markup.Escape(candidate.RelativePath)}");
+    }
+}
+
+/// <summary>
+/// 專案管理指令寫入記錄失敗時，在標準錯誤印出錯誤訊息（紅色）；其餘流程的寫入失敗交給 NoticeWriter 提示。
+/// </summary>
+static void PrintStoreWriteError(ProjectStateStore store) =>
+    StandardError().MarkupLine($"[red]{Markup.Escape(store.WriteFailureMessage)}[/]");
+
+/// <summary>
+/// --clear-default、--set-default、--projects：管理工作目錄的預設專案並列出偵測到的專案。
+/// 多個旗標一起使用時依清除 → 設定 → 列出的順序執行。
+/// </summary>
+static int RunProjectCommand(
+    ProjectStateStore store,
+    string workingDir,
+    bool list,
+    string? setDefaultQuery,
+    bool clearDefault,
+    NoticeWriter notices
+)
+{
+    if (clearDefault)
+    {
+        if (!store.ClearDefault(workingDir))
+        {
+            PrintStoreWriteError(store);
+            return 1;
+        }
+
+        AnsiConsole.MarkupLine("已清除預設專案");
+    }
+
+    if (setDefaultQuery is null && !list)
+    {
+        return 0;
+    }
+
+    ScanResult scan = ProjectDiscovery.Scan(workingDir);
+    foreach (string message in ProjectDiscovery.ScanNotices(scan))
+    {
+        notices.Write(message);
+    }
+
+    if (setDefaultQuery is not null)
+    {
+        int setResult = ApplySetDefault(store, workingDir, setDefaultQuery, scan.Projects);
+        if (setResult != 0)
+        {
+            return setResult;
+        }
+    }
+
+    return list ? PrintProjectTable(store, workingDir, scan.Projects) : 0;
+}
+
+/// <summary>--set-default：比對名稱並寫入預設專案。回傳 0 成功、2 沒有唯一符合、1 寫入失敗。</summary>
+static int ApplySetDefault(
+    ProjectStateStore store,
+    string workingDir,
+    string query,
+    IReadOnlyList<DiscoveredProject> discovered
+)
+{
+    MatchResult match = ProjectDiscovery.Match(discovered, query);
+    if (match.Hit is null)
+    {
+        PrintProjectCandidates(ProjectDiscovery.DescribeMiss(query, match, discovered));
+        return 2;
+    }
+
+    if (!store.SetDefault(workingDir, match.Hit.FullPath))
+    {
+        PrintStoreWriteError(store);
+        return 1;
+    }
+
+    AnsiConsole.MarkupLine($"預設專案: {Markup.Escape(match.Hit.RelativePath)}");
+    return 0;
+}
+
+/// <summary>--projects：在標準輸出列出偵測到的專案與預設、上次執行標記。沒有任何專案時在標準錯誤說明並回傳 1。</summary>
+static int PrintProjectTable(ProjectStateStore store, string workingDir, IReadOnlyList<DiscoveredProject> discovered)
+{
+    if (discovered.Count == 0)
+    {
+        StandardError().MarkupLine($"[red]找不到任何 {Markup.Escape(ProjectDiscovery.ExtensionList)}[/]");
+        return 1;
+    }
+
+    ProjectState saved = store.Get(workingDir);
+    var table = new Table().Border(TableBorder.Simple);
+    table.AddColumn("專案");
+    table.AddColumn("標記");
+    foreach (DiscoveredProject project in discovered)
+    {
+        table.AddRow(
+            Markup.Escape(project.RelativePath),
+            Markup.Escape(ProjectPicker.Markers(project, saved))
+        );
+    }
+
+    AnsiConsole.Write(table);
+    return 0;
 }
 
 /// <summary>列出可監看的受控行程，方便挑 PID。</summary>
@@ -811,7 +1112,8 @@ static async Task<int> RunOutput(int? pid)
     }
 }
 
-static void PrintHelp()
+/// <summary>把說明文字寫到 output：--help 寫到標準輸出，參數錯誤時寫到標準錯誤。</summary>
+static void PrintHelp(TextWriter output)
 {
     string version =
         Assembly
@@ -819,7 +1121,7 @@ static void PrintHelp()
             ?.GetCustomAttribute<AssemblyInformationalVersionAttribute>()
             ?.InformationalVersion ?? "unknown";
     // 說明文字含 [--top N] 這類方括號，交給 Spectre 會被當成樣式標記，因此直接輸出純文字
-    Console.WriteLine(
+    output.WriteLine(
         $"""
         clrdiag {version} — 終端機版 .NET 記憶體 / 執行緒診斷主控台（不需要 Visual Studio）
 
@@ -841,7 +1143,21 @@ static void PrintHelp()
           clrdiag --install-skill       安裝 Claude Code 技能（後接 global 或 local）
           clrdiag --force               搭配 --install-skill：安裝位置已有真實目錄時覆寫它
           clrdiag --config <path>       指定設定檔
-          clrdiag --root <path>         指定專案根目錄
+          clrdiag --root <path>         指定專案根目錄（不做專案自動偵測）
+          clrdiag --project <名稱>      以名稱或相對路徑指定工作目錄底下的專案
+          clrdiag --pick                不使用預設專案，一律顯示專案選單
+          clrdiag --projects            列出工作目錄底下偵測到的專案（★ 預設、◎ 上次）
+          clrdiag --set-default <名稱>  設定這個工作目錄的預設專案
+          clrdiag --clear-default       清除這個工作目錄的預設專案
+
+        專案自動偵測
+          沒有 --root / --config 時，往下掃描工作目錄（深度 5）的 .sln / .slnx / .csproj / .vbproj。
+          決定順序：--project → --pick（選單）→ 預設專案 → 只有一個專案 → 選單（上次執行排第一）。
+          批次模式不顯示選單，沿用上次執行的專案；仍無法決定時列出候選並以結束碼 2 結束。
+          --project 的值空白或沒有唯一符合（包括沒有偵測到任何專案）時以結束碼 2 結束。
+          選單最後一項「取消」不啟動儀表板，以結束碼 0 結束。
+          --init、--install-skill、--output 不做專案偵測。
+          記錄存在 %LOCALAPPDATA%\clrdiag\projects.json，以工作目錄為鍵。
 
         設定檔
           在專案根目錄放 clrdiag.json（會從目前目錄往上尋找）即可設定建置指令、

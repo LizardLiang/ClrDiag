@@ -56,9 +56,55 @@ process instead.
 tool picks the best match from `processNames`. Pass `--pid` whenever more than one
 candidate exists. Ambiguity produces a correct report about the wrong process.
 
-**Working directory.** The tool searches upward from the current directory for
-`clrdiag.json`. Use `--root <path>` or `--config <path>` to override that search.
-`--root` also sets the project root that derives the debug pipe name.
+**Working directory.** Without `--root` or `--config`, the tool scans down the
+current directory (depth 5) for `.sln`, `.slnx`, `.csproj`, and `.vbproj` files.
+Batch commands never show a picker. They resolve the project in this order:
+
+1. `--project <name>`: exact relative path, then file name, then a unique part of the relative path.
+2. The default project saved for this directory.
+3. The single project found.
+4. The project last run in the interactive dashboard.
+
+When none of these decides, the tool prints the candidates and exits with code 2.
+Pass `--project` in that case.
+`--list` is the exception: it searches upward for `clrdiag.json` instead,
+lists processes as usual, and prints a "multiple projects" notice to stderr.
+The notice also names a saved default or last-run project that no longer exists.
+`--list` does not change the saved records.
+A blank `--project` value, or a name that matches
+nothing, also exits with code 2, with `--list` too. This holds when the scan finds no project too.
+When the scan finds nothing and no `--project` is given, the tool searches
+upward for `clrdiag.json` as before. The chosen project folder is the root, unless
+a `clrdiag.json` above it sets the root. `--root <path>` and `--config <path>`
+skip the scan. `--root` also sets the project root that derives the debug pipe name.
+`--init`, `--install-skill`, and `--output` also skip the scan. A warning
+names any flag that has no effect in the given combination.
+The scan skips junctions and symbolic links. It enters the OneDrive sync root and
+its subfolders, which carry a reparse point but are not links. It skips folders
+whose link target it cannot read, and prints how many it skipped.
+It stops after 20,000 folders, or after 10 seconds, and prints a notice.
+A slow network drive or OneDrive cloud-only folders can use up the 10 seconds.
+The tool checks the time limit between folders. A single folder read that hangs
+can make the scan take longer than 10 seconds.
+Pass `--project` or `--root` when you see that notice.
+In batch commands, warnings and notices go to stderr as plain text.
+Stdout holds only the command result, so `--pipe-name` prints only the pipe name.
+A `--project` or `--set-default` miss prints its error and candidates to stderr.
+A failed record write and an empty `--projects` result also go to stderr.
+Exit codes do not change. The `--projects` table stays on stdout.
+Argument errors (unknown flag, missing `--project` or `--set-default` value,
+bad `--install-skill` scope) and a failed `clrdiag.json` load go to stderr with exit code 2.
+Stdout and stderr are UTF-8 without a BOM for every non-interactive flag:
+`--snapshot`, `--threads`, `--roots`, `--render`, `--output`, `--dap`, `--list`,
+`--init`, `--build`, `--export`, `--send`, `--pipe-name`, `--install-skill`,
+`--projects`, `--set-default`, `--clear-default`. Argument errors are UTF-8 too.
+`--help` writes UTF-8 when stdout is redirected, for example `clrdiag --help > help.txt`.
+Run `clrdiag --projects` to see the projects found, with the default (`★ 預設`)
+and last-run (`◎ 上次`) markers.
+
+**Known limitation.** Batch commands prefer the saved default over the last run.
+Suppose the default is project A and the dashboard was started on B with `--pick`.
+Then `clrdiag --send` targets A's pipe. Pass `--project B` in that case.
 
 ## 1. Build and serve
 
@@ -337,6 +383,10 @@ holds a debug session on the same process.
 | `--port` | `N` | none | Override the config port for the probe and placeholders. |
 | `--root` | `path` | none | Set the project root for config search and pipe name. |
 | `--config` | `path` | none | Point at an explicit clrdiag.json. |
+| `--project` | `name` | Exit 2 with candidates on a blank value or no unique match. | Any command, when the directory holds more than one project. |
+| `--projects` | none | Projects found below the directory, with `★ 預設` and `◎ 上次` markers. Exit 1 if none. | Before `--project`, to see the names. |
+| `--set-default` | `name` | The new default. Exit 2 with candidates on no unique match. | Pin the project for later runs in this directory. |
+| `--clear-default` | none | Confirmation line. | Remove the saved default. |
 | `--snapshot` | none | Header, totals, and a type histogram. | Memory leak hunt, step 1 and step 3. |
 | `--top` | `N` | none | With `--snapshot`, set the histogram row count. Default 25. |
 | `--threads` | none | Managed thread callstacks. Max 20 frames each. | Hangs, deadlocks, thread pool starvation. Run alone. |

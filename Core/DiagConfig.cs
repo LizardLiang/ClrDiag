@@ -14,6 +14,12 @@ public sealed record DiagConfig
     /// <summary>設定檔預設檔名，會從目前目錄往上尋找。</summary>
     public const string FileName = "clrdiag.json";
 
+    /// <summary>
+    /// 視為方案檔或專案檔的副檔名，依自動挑選建置目標的優先順序排列；
+    /// 工作目錄的專案掃描也使用同一份清單。
+    /// </summary>
+    public static readonly IReadOnlyList<string> ProjectExtensions = new[] { ".sln", ".slnx", ".csproj", ".vbproj" };
+
     /// <summary>專案根目錄。設定檔中的相對路徑都以此為基準。</summary>
     [JsonIgnore]
     public string Root { get; init; } = Directory.GetCurrentDirectory();
@@ -149,11 +155,23 @@ public sealed record DiagConfig
 
     /// <summary>
     /// 載入設定：先從 explicitConfig 或往上尋找 clrdiag.json，找不到就純自動偵測。
+    /// explicitBuildProject 是從工作目錄掃描選定的方案檔或專案檔：往上尋找 clrdiag.json 改從它的資料夾開始，
+    /// 沒有設定檔時 Root 就是它的資料夾；設定檔沒有指定 buildProject 時，建置目標就是這個檔案。
+    /// 找到設定檔時 Root 仍是設定檔所在資料夾，設定檔內的相對路徑才會對齊。
     /// </summary>
-    public static DiagConfig Load(string? explicitConfig, string? explicitRoot)
+    public static DiagConfig Load(
+        string? explicitConfig,
+        string? explicitRoot,
+        string? explicitBuildProject = null
+    )
     {
-        string? configFile =
-            explicitConfig ?? FindConfigFile(explicitRoot ?? Directory.GetCurrentDirectory());
+        string? projectFile = explicitBuildProject is null
+            ? null
+            : Path.GetFullPath(explicitBuildProject);
+        string? projectFolder = projectFile is null ? null : Path.GetDirectoryName(projectFile);
+        string searchStart = explicitRoot ?? projectFolder ?? Directory.GetCurrentDirectory();
+
+        string? configFile = explicitConfig ?? FindConfigFile(searchStart);
         DiagConfig config;
 
         if (configFile is not null)
@@ -172,8 +190,13 @@ public sealed record DiagConfig
         {
             config = new DiagConfig
             {
-                Root = explicitRoot ?? FindProjectRoot(Directory.GetCurrentDirectory()),
+                Root = explicitRoot ?? projectFolder ?? FindProjectRoot(Directory.GetCurrentDirectory()),
             };
+        }
+
+        if (projectFile is not null && config.BuildProject is null)
+        {
+            config = config with { BuildProject = projectFile };
         }
 
         config.ResolveBuildTarget();
@@ -204,16 +227,17 @@ public sealed record DiagConfig
         return null;
     }
 
-    /// <summary>沒有設定檔時，往上找第一個含 .sln / 專案檔 / .git 的目錄當作根目錄。</summary>
+    /// <summary>
+    /// 沒有設定檔時，往上找第一個含 ProjectExtensions 任一副檔名的檔案或 .git 的目錄當作根目錄。
+    /// </summary>
     private static string FindProjectRoot(string startDirectory)
     {
         var directory = new DirectoryInfo(startDirectory);
         while (directory is not null)
         {
+            DirectoryInfo current = directory;
             if (
-                directory.EnumerateFiles("*.sln").Any()
-                || directory.EnumerateFiles("*.slnx").Any()
-                || directory.EnumerateFiles("*.csproj").Any()
+                ProjectExtensions.Any(extension => current.EnumerateFiles("*" + extension).Any())
                 || Directory.Exists(Path.Combine(directory.FullName, ".git"))
             )
             {
@@ -262,14 +286,16 @@ public sealed record DiagConfig
     private static string? FindBuildTarget(string root)
     {
         var directory = new DirectoryInfo(root);
-        return directory.EnumerateFiles("*.sln").FirstOrDefault()?.FullName ?? directory
-                .EnumerateFiles("*.slnx")
-                .FirstOrDefault()
-                ?.FullName
-            ?? directory.EnumerateFiles("*.csproj").FirstOrDefault()?.FullName ?? directory
-                .EnumerateFiles("*.vbproj")
-                .FirstOrDefault()
-                ?.FullName;
+        foreach (string extension in ProjectExtensions)
+        {
+            string? found = directory.EnumerateFiles("*" + extension).FirstOrDefault()?.FullName;
+            if (found is not null)
+            {
+                return found;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>SDK 樣式專案（Project Sdk="..."）用 dotnet build；舊式 .NET Framework 專案需要 MSBuild。</summary>
