@@ -31,6 +31,12 @@
   <ItemGroup>
     <None Update="README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
+  <!-- tests/ 是獨立的 xUnit 專案；SDK 預設的萬用字元會把它的原始碼一併編進工具，這裡排除。 -->
+  <ItemGroup>
+    <Compile Remove="tests/**" />
+    <None Remove="tests/**" />
+    <EmbeddedResource Remove="tests/**" />
+  </ItemGroup>
   <!-- Claude Code 技能檔內嵌進組件：install-skill 指令會把它們解壓到 %LOCALAPPDATA% 快取，
        再從安裝位置建立符號連結。內嵌是唯一的散布方式，nupkg 靠組件本身帶走這些檔案。 -->
   <ItemGroup>
