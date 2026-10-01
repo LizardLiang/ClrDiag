@@ -227,16 +227,17 @@ public sealed record DiagConfig
         return null;
     }
 
-    /// <summary>沒有設定檔時，往上找第一個含 .sln / 專案檔 / .git 的目錄當作根目錄。</summary>
+    /// <summary>
+    /// 沒有設定檔時，往上找第一個含 ProjectExtensions 任一副檔名的檔案或 .git 的目錄當作根目錄。
+    /// </summary>
     private static string FindProjectRoot(string startDirectory)
     {
         var directory = new DirectoryInfo(startDirectory);
         while (directory is not null)
         {
+            DirectoryInfo current = directory;
             if (
-                directory.EnumerateFiles("*.sln").Any()
-                || directory.EnumerateFiles("*.slnx").Any()
-                || directory.EnumerateFiles("*.csproj").Any()
+                ProjectExtensions.Any(extension => current.EnumerateFiles("*" + extension).Any())
                 || Directory.Exists(Path.Combine(directory.FullName, ".git"))
             )
             {

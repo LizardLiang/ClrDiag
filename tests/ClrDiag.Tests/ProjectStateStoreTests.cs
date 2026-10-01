@@ -104,7 +104,8 @@ public sealed class ProjectStateStoreTests : IDisposable
         Assert.Equal(ProjectState.Empty, store.Get(_tree.Root));
         Assert.True(store.SetDefault(_tree.Root, project));
         Assert.Equal(project, store.Get(_tree.Root).Default);
-        Assert.Equal(content, File.ReadAllText(StorePath + ".bak"));
+        var backup = Assert.Single(Backups());
+        Assert.Equal(content, File.ReadAllText(backup));
     }
 
     [Fact]
@@ -122,7 +123,7 @@ public sealed class ProjectStateStoreTests : IDisposable
 
         Assert.Equal(before, File.ReadAllText(StorePath));
         Assert.Equal(a, store.Get(_tree.PathOf("A")).Default);
-        Assert.False(File.Exists(StorePath + ".bak"));
+        Assert.Empty(Backups());
     }
 
     [Fact]
@@ -152,20 +153,98 @@ public sealed class ProjectStateStoreTests : IDisposable
         Assert.True(File.Exists(fresh));
     }
 
+    private string[] Backups() =>
+        Directory.Exists(Path.GetDirectoryName(StorePath)!)
+            ? Directory.GetFiles(Path.GetDirectoryName(StorePath)!, "projects.json.*.bak")
+            : Array.Empty<string>();
+
     [Fact]
-    public void 寫入時移除工作目錄已不存在的記錄()
+    public void 寫入時保留工作目錄目前不存在的記錄()
     {
         var project = _tree.File("A/A.csproj");
-        var gone = _tree.PathOf("Gone");
-        Directory.CreateDirectory(gone);
+        var offline = _tree.PathOf("Offline");
         var store = new ProjectStateStore(StorePath);
-        store.SetDefault(gone, project);
-        Directory.Delete(gone);
+        Assert.True(store.SetDefault(offline, project));
 
         Assert.True(store.SetDefault(_tree.Root, project));
 
-        Assert.Equal(ProjectState.Empty, store.Get(gone));
+        Assert.False(Directory.Exists(offline));
+        Assert.Equal(project, store.Get(offline).Default);
         Assert.Equal(project, store.Get(_tree.Root).Default);
+    }
+
+    [Fact]
+    public void 損毀檔案的備份以時間命名且最多保留三份()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(StorePath)!);
+        var project = _tree.File("A/A.csproj");
+        var now = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+        var store = new ProjectStateStore(StorePath, clock: () => now = now.AddSeconds(1));
+
+        for (var i = 1; i <= ProjectStateStore.MaxBackups + 1; i++)
+        {
+            File.WriteAllText(StorePath, $"broken {i}");
+            Assert.True(store.SetDefault(_tree.Root, project));
+        }
+
+        var kept = Backups().Select(File.ReadAllText).OrderBy(text => text).ToArray();
+        Assert.Equal(new[] { "broken 2", "broken 3", "broken 4" }, kept);
+        Assert.All(Backups(), file => Assert.Matches(@"projects\.json\.\d{17}\.bak$", file));
+    }
+
+    [Fact]
+    public void 狀態檔所在資料夾不存在時視為空狀態且可寫入()
+    {
+        var project = _tree.File("A/A.csproj");
+        var store = new ProjectStateStore(_tree.PathOf("missing/deeper/projects.json"));
+
+        Assert.Equal(ProjectState.Empty, store.Get(_tree.Root));
+        Assert.True(store.SetDefault(_tree.Root, project));
+        Assert.Equal(project, store.Get(_tree.Root).Default);
+    }
+
+    [Fact]
+    public void Clear同時清除預設與上次執行()
+    {
+        var project = _tree.File("A/A.csproj");
+        var store = new ProjectStateStore(StorePath);
+        store.SetDefault(_tree.Root, project);
+        store.SetLastRun(_tree.Root, project);
+
+        Assert.True(store.Clear(_tree.Root, clearDefault: true, clearLastRun: true));
+
+        Assert.Equal(ProjectState.Empty, store.Get(_tree.Root));
+    }
+
+    [Fact]
+    public void Clear只清除指定的欄位()
+    {
+        var project = _tree.File("A/A.csproj");
+        var store = new ProjectStateStore(StorePath);
+        store.SetDefault(_tree.Root, project);
+        store.SetLastRun(_tree.Root, project);
+
+        Assert.True(store.Clear(_tree.Root, clearDefault: false, clearLastRun: true));
+
+        Assert.Equal(project, store.Get(_tree.Root).Default);
+        Assert.Null(store.Get(_tree.Root).LastRun);
+    }
+
+    [Fact]
+    public void Clear兩個欄位都不清除時不建立狀態檔()
+    {
+        Assert.True(new ProjectStateStore(StorePath).Clear(_tree.Root, false, false));
+        Assert.False(File.Exists(StorePath));
+    }
+
+    [Fact]
+    public void 無法開啟具名Mutex時寫入回傳false()
+    {
+        using var sameName = new EventWaitHandle(false, EventResetMode.ManualReset, ProjectStateStore.MutexNameFor(StorePath));
+        var store = new ProjectStateStore(StorePath);
+
+        Assert.False(store.SetDefault(_tree.Root, _tree.File("A/A.csproj")));
+        Assert.False(File.Exists(StorePath));
     }
 
     [Fact]

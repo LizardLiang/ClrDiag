@@ -72,10 +72,13 @@ When the scan finds nothing and no `--project` is given, the tool searches
 upward for `clrdiag.json` as before. The chosen project folder is the root, unless
 a `clrdiag.json` above it sets the root. `--root <path>` and `--config <path>`
 skip the scan. `--root` also sets the project root that derives the debug pipe name.
-`--init`, `--install-skill`, and `--output` also skip the scan. A yellow warning
+`--init`, `--install-skill`, and `--output` also skip the scan. A warning
 names any flag that has no effect in the given combination.
-The scan stops after 20,000 folders or 2 seconds and prints a yellow notice.
+The scan skips junctions and symbolic links. It stops after 20,000 folders
+(or after 10 seconds on a slow network drive) and prints a notice.
 Pass `--project` or `--root` when you see that notice.
+In batch commands, warnings and notices go to stderr as plain text.
+Stdout holds only the command result, so `--pipe-name` prints only the pipe name.
 Run `clrdiag --projects` to see the projects found, with the default (`★ 預設`)
 and last-run (`◎ 上次`) markers.
 

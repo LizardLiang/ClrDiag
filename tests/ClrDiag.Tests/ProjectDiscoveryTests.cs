@@ -45,6 +45,81 @@ public sealed class ProjectDiscoveryTests : IDisposable
     }
 
     [Fact]
+    public void Scan_不進入連結點資料夾()
+    {
+        _tree.File("App/App.csproj");
+        var link = _tree.PathOf("Link");
+        var loop = _tree.PathOf("App/Loop");
+        CreateJunction(link, _tree.PathOf("App"));
+        CreateJunction(loop, _tree.Root);
+        try
+        {
+            var result = ProjectDiscovery.Scan(_tree.Root).Projects;
+
+            Assert.True(File.Exists(Path.Combine(link, "App.csproj")));
+            Assert.Equal(new[] { "App/App.csproj" }, Paths(result));
+        }
+        finally
+        {
+            // 只移除連結點本身，不動連結指向的資料夾
+            Directory.Delete(loop);
+            Directory.Delete(link);
+        }
+    }
+
+    [Theory]
+    [InlineData("..foo/A.csproj", true)]
+    [InlineData("sub/..bar/B.csproj", true)]
+    [InlineData("../Outside.csproj", false)]
+    public void IsInside_以完整路徑段判斷是否位於工作目錄外(string relative, bool expected)
+    {
+        var work = _tree.PathOf("work");
+
+        Assert.Equal(expected, ProjectDiscovery.IsInside(work, Path.GetFullPath(Path.Combine(work, relative))));
+    }
+
+    [Fact]
+    public void IsInside_不同磁碟的路徑不在工作目錄內()
+    {
+        var other = _tree.Root.StartsWith("Z:", StringComparison.OrdinalIgnoreCase) ? @"Y:\X.csproj" : @"Z:\X.csproj";
+
+        Assert.False(ProjectDiscovery.IsInside(_tree.Root, other));
+    }
+
+    [Fact]
+    public void IncludeSaved_補上名稱以兩個點開頭的資料夾中的記錄()
+    {
+        _tree.File("Root.sln");
+        var dotted = _tree.File("..foo/Dotted.csproj");
+        var limited = ProjectDiscovery.Scan(_tree.Root, maxFolders: 1);
+
+        var merged = ProjectDiscovery.IncludeSaved(limited.Projects, _tree.Root, new ProjectState { Default = dotted });
+
+        Assert.Equal(new[] { "..foo/Dotted.csproj", "Root.sln" }, Paths(merged));
+    }
+
+    [Fact]
+    public void RelativePathOf_以斜線分隔()
+    {
+        Assert.Equal("A/B/C.csproj", ProjectDiscovery.RelativePathOf(_tree.Root, _tree.PathOf("A/B/C.csproj")));
+    }
+
+    private static void CreateJunction(string link, string target)
+    {
+        using var process = System.Diagnostics.Process.Start(
+            new System.Diagnostics.ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{target}\"")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+            }
+        )!;
+        process.StandardOutput.ReadToEnd();
+        process.WaitForExit();
+        Assert.Equal(0, process.ExitCode);
+    }
+
+    [Fact]
     public void Scan_超過深度上限的資料夾不再進入()
     {
         _tree.File("Root.sln");

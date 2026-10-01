@@ -21,7 +21,7 @@ public sealed record ProjectState
 
     /// <summary>
     /// 這筆記錄最後一次變更的時間，清理記錄時保留最近變更的工作目錄。
-    /// 沒有這個欄位的記錄（例如較早版本寫入的檔案）視為最舊。
+    /// 沒有 updated 欄位的記錄視為最舊。
     /// </summary>
     [JsonPropertyName("updated")]
     public DateTimeOffset? Updated { get; init; }
@@ -31,14 +31,19 @@ public sealed record ProjectState
 /// 讀寫 %LOCALAPPDATA%\clrdiag\projects.json，以工作目錄（不分大小寫）為鍵保存 ProjectState。
 /// 讀取時檔案不存在、無法讀取或 JSON 損毀都視為空狀態。
 /// 寫入是「讀取 → 修改 → 寫回」，以具名 Mutex 串接同一個檔案的所有 clrdiag 行程：
-/// 檔案存在但讀不到時不寫入，避免蓋掉其他工作目錄的記錄；JSON 損毀時先改名為 projects.json.bak 再寫入新檔。
-/// 寫入先寫暫存檔再取代，中途中斷也不會留下半份檔案；每次寫入順便清理已失效的工作目錄、
-/// 超過上限的舊記錄，以及先前中斷留下的暫存檔。
+/// 檔案存在但讀不到時不寫入，避免蓋掉其他工作目錄的記錄；JSON 損毀時先改名為
+/// projects.json.&lt;時間&gt;.bak 再寫入新檔，最多保留 MaxBackups 份備份。
+/// 寫入先寫暫存檔再取代，中途中斷也不會留下半份檔案；每次寫入順便清理超過上限的舊記錄
+/// 與先前中斷留下的暫存檔。清理只依記錄數與變更時間決定，不檢查工作目錄是否存在，
+/// 因此離線的隨身碟、網路磁碟或 VPN 路徑的記錄會保留下來。
 /// </summary>
 public sealed class ProjectStateStore
 {
     /// <summary>保存的工作目錄數上限，超過時保留最近變更的記錄。</summary>
     public const int DefaultMaxEntries = 100;
+
+    /// <summary>損毀狀態檔備份的保留份數，超過時刪除最舊的備份。</summary>
+    public const int MaxBackups = 3;
 
     /// <summary>等待其他 clrdiag 行程釋放檔案鎖的時間上限。</summary>
     public static readonly TimeSpan DefaultLockTimeout = TimeSpan.FromSeconds(2);
@@ -67,7 +72,7 @@ public sealed class ProjectStateStore
 
     /// <summary>
     /// filePath 指定狀態檔位置，測試可指向暫存資料夾；maxEntries 是保存的工作目錄數上限；
-    /// lockTimeout 是等待檔案鎖的時間上限；clock 提供記錄的變更時間。
+    /// lockTimeout 是等待檔案鎖的時間上限；clock 提供記錄的變更時間與備份檔名中的時間。
     /// </summary>
     public ProjectStateStore(
         string filePath,
@@ -92,6 +97,7 @@ public sealed class ProjectStateStore
     public static string MutexNameFor(string filePath)
     {
         byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(filePath).ToLowerInvariant()));
+        // Local\ 的範圍是目前的登入工作階段，狀態檔位於該使用者自己的 %LOCALAPPDATA%。
         return $@"Local\clrdiag-projects-{Convert.ToHexString(hash)[..16]}";
     }
 
@@ -114,6 +120,21 @@ public sealed class ProjectStateStore
 
     /// <summary>清除上次執行的專案，用於移除已不存在的記錄。回傳是否成功寫入。</summary>
     public bool ClearLastRun(string workingDir) => Update(workingDir, s => s with { LastRun = null });
+
+    /// <summary>
+    /// 在同一次「讀取 → 修改 → 寫回」中清除指定的欄位，用於一併移除已不存在的預設與上次執行記錄。
+    /// 兩個欄位都不清除時不讀寫檔案。回傳是否成功寫入。
+    /// </summary>
+    public bool Clear(string workingDir, bool clearDefault, bool clearLastRun)
+    {
+        if (!clearDefault && !clearLastRun)
+            return true;
+
+        return Update(
+            workingDir,
+            s => s with { Default = clearDefault ? null : s.Default, LastRun = clearLastRun ? null : s.LastRun }
+        );
+    }
 
     /// <summary>把工作目錄轉成狀態檔的鍵：完整路徑、去掉結尾分隔符、轉小寫。</summary>
     public static string NormalizeKey(string workingDir) =>
@@ -163,13 +184,14 @@ public sealed class ProjectStateStore
 
     private (ReadStatus Status, Dictionary<string, ProjectState?> Entries) ReadAll()
     {
-        if (!File.Exists(_filePath))
-            return (ReadStatus.Missing, new Dictionary<string, ProjectState?>());
-
         string json;
         try
         {
             json = File.ReadAllText(_filePath);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return (ReadStatus.Missing, new Dictionary<string, ProjectState?>());
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -189,29 +211,57 @@ public sealed class ProjectStateStore
         }
     }
 
-    /// <summary>把損毀的狀態檔改名為 .bak 保留原始內容；改名失敗時回傳 false。</summary>
+    /// <summary>
+    /// 把損毀的狀態檔改名為 projects.json.&lt;yyyyMMddHHmmssfff&gt;.bak 保留原始內容，
+    /// 再刪除超過 MaxBackups 份的舊備份。改名失敗時回傳 false。
+    /// </summary>
     private bool BackUpCorruptFile()
     {
         try
         {
-            File.Move(_filePath, _filePath + ".bak", overwrite: true);
-            return true;
+            File.Move(_filePath, $"{_filePath}.{_clock():yyyyMMddHHmmssfff}.bak", overwrite: true);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return false;
         }
+
+        RemoveOldBackups();
+        return true;
+    }
+
+    /// <summary>依檔名中的時間保留最新的 MaxBackups 份備份；刪不掉的留到下次。</summary>
+    private void RemoveOldBackups()
+    {
+        try
+        {
+            var folder = Path.GetDirectoryName(_filePath) ?? ".";
+            var oldBackups = Directory
+                .EnumerateFiles(folder, Path.GetFileName(_filePath) + ".*.bak")
+                .OrderByDescending(file => file, StringComparer.OrdinalIgnoreCase)
+                .Skip(MaxBackups)
+                .ToList();
+            foreach (var file in oldBackups)
+            {
+                try
+                {
+                    File.Delete(file);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     }
 
     /// <summary>
-    /// 移除工作目錄已不存在的記錄（目前寫入的工作目錄除外），
-    /// 數量仍超過上限時保留目前的工作目錄與最近變更的記錄。
+    /// 移除空的記錄；數量仍超過上限時保留目前的工作目錄與最近變更的記錄。
+    /// 只依記錄數與變更時間決定，不存取檔案系統。
     /// </summary>
     private void Prune(Dictionary<string, ProjectState?> all, string currentKey)
     {
         foreach (var key in all.Keys.ToList())
         {
-            if (key != currentKey && (all[key] is null || !Directory.Exists(key)))
+            if (key != currentKey && all[key] is null)
                 all.Remove(key);
         }
 
@@ -283,10 +333,22 @@ public sealed class ProjectStateStore
             _mutex = mutex;
         }
 
-        /// <summary>在 timeout 內取得鎖；逾時回傳 null。前一個持有者異常結束時視為取得。</summary>
+        /// <summary>
+        /// 在 timeout 內取得鎖；逾時或無法開啟具名 Mutex 時回傳 null。前一個持有者異常結束時視為取得。
+        /// </summary>
         public static FileLock? Acquire(string name, TimeSpan timeout)
         {
-            var mutex = new Mutex(initiallyOwned: false, name);
+            Mutex mutex;
+            try
+            {
+                mutex = new Mutex(initiallyOwned: false, name);
+            }
+            catch (Exception ex)
+                when (ex is UnauthorizedAccessException or IOException or WaitHandleCannotBeOpenedException)
+            {
+                return null;
+            }
+
             bool acquired;
             try
             {

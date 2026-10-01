@@ -79,8 +79,9 @@ public static class ProjectSelection
     }
 
     /// <summary>
-    /// 掃描工作目錄並決定要用的專案。interactive 時移除已失效的記錄、必要時呼叫 prompt 顯示選單，
-    /// 使用者同意時寫入預設專案；prompt 回傳 null 代表使用者取消。
+    /// 掃描工作目錄並決定要用的專案。必要時呼叫 prompt 顯示選單，prompt 回傳 null 代表使用者取消。
+    /// interactive 且選定了專案時，才移除已失效的記錄並在使用者同意時寫入預設專案；
+    /// 取消、錯誤與批次模式不寫入狀態檔。
     /// 掃描達到上限、記錄寫入失敗、使用者取消等非致命訊息交給 notice 輸出。
     /// </summary>
     public static ProjectSelectionResult Resolve(
@@ -103,37 +104,16 @@ public static class ProjectSelection
         }
 
         ProjectResolution resolution = ProjectResolver.Resolve(discovered, saved, projectQuery, pick, interactive);
-
-        // 已不存在的記錄只在互動模式清除；批次模式只讀不寫。
-        if (interactive && resolution.StaleDefault && !store.ClearDefault(workingDir))
-            notice(store.WriteFailureMessage);
-
-        if (interactive && resolution.StaleLastRun && !store.ClearLastRun(workingDir))
-            notice(store.WriteFailureMessage);
+        void ClearStale() => ClearStaleRecords(store, workingDir, resolution, interactive, notice);
 
         switch (resolution.Outcome)
         {
             case ResolveOutcome.Use use:
+                ClearStale();
                 return new ProjectSelectionResult(use.Project, SourceLabel(use.Source), null, null);
 
             case ResolveOutcome.Prompt choose:
-                ProjectPick? picked = prompt(choose.Projects, choose.Preselect, saved);
-                if (picked is null)
-                {
-                    notice("已取消，未啟動儀表板");
-                    return new ProjectSelectionResult(null, null, CancelExitCode, null);
-                }
-
-                string label = "選單";
-                if (picked.SetAsDefault)
-                {
-                    if (store.SetDefault(workingDir, picked.Project.FullPath))
-                        label = "選單，已設為預設";
-                    else
-                        notice(store.WriteFailureMessage);
-                }
-
-                return new ProjectSelectionResult(picked.Project, label, null, null);
+                return RunPrompt(store, workingDir, choose, saved, prompt, ClearStale, notice);
 
             case ResolveOutcome.Error error:
                 return new ProjectSelectionResult(
@@ -146,6 +126,56 @@ public static class ProjectSelection
             default:
                 return new ProjectSelectionResult(null, null, null, null);
         }
+    }
+
+    /// <summary>
+    /// 顯示選單並處理結果：取消時不寫入任何記錄；選定專案後先呼叫 clearStale 移除已失效的記錄，
+    /// 使用者同意時再寫入預設專案。
+    /// </summary>
+    private static ProjectSelectionResult RunPrompt(
+        ProjectStateStore store,
+        string workingDir,
+        ResolveOutcome.Prompt choose,
+        ProjectState saved,
+        Func<IReadOnlyList<DiscoveredProject>, DiscoveredProject?, ProjectState, ProjectPick?> prompt,
+        Action clearStale,
+        Action<string> notice
+    )
+    {
+        ProjectPick? picked = prompt(choose.Projects, choose.Preselect, saved);
+        if (picked is null)
+        {
+            notice("已取消，未啟動儀表板");
+            return new ProjectSelectionResult(null, null, CancelExitCode, null);
+        }
+
+        clearStale();
+
+        string label = "選單";
+        if (picked.SetAsDefault)
+        {
+            if (store.SetDefault(workingDir, picked.Project.FullPath))
+                label = "選單，已設為預設";
+            else
+                notice(store.WriteFailureMessage);
+        }
+
+        return new ProjectSelectionResult(picked.Project, label, null, null);
+    }
+
+    /// <summary>
+    /// 互動模式選定專案後，以一次寫入移除已不存在的預設與上次執行記錄；批次模式只讀不寫。
+    /// </summary>
+    private static void ClearStaleRecords(
+        ProjectStateStore store,
+        string workingDir,
+        ProjectResolution resolution,
+        bool interactive,
+        Action<string> notice
+    )
+    {
+        if (interactive && !store.Clear(workingDir, resolution.StaleDefault, resolution.StaleLastRun))
+            notice(store.WriteFailureMessage);
     }
 
     /// <summary>啟動訊息中說明專案來源的文字。</summary>
@@ -175,7 +205,7 @@ public static class ProjectSelection
             )
         )
         {
-            string relative = Path.GetRelativePath(workingDir, target).Replace('\\', '/');
+            string relative = ProjectDiscovery.RelativePathOf(workingDir, target);
             status += $"  建置目標: {relative}（{DiagConfig.FileName} 的 buildProject 優先）";
         }
 

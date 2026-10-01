@@ -62,7 +62,7 @@ clrdiag --clear-default          # 清除這個工作目錄的預設專案
 
 ### 專案自動偵測
 
-沒有 `--root` 或 `--config` 時，clrdiag 往下掃描工作目錄（深度 5），找出所有 `.sln`、`.slnx`、`.csproj`、`.vbproj`。`bin`、`obj`、`node_modules`、`packages` 與以 `.` 開頭的資料夾不掃描。掃描最多檢查 20,000 個資料夾、最多 2 秒；達到上限時 clrdiag 印出黃色提示，清單可能不完整，這時請用 `--project` 或 `--root`。
+沒有 `--root` 或 `--config` 時，clrdiag 往下掃描工作目錄（深度 5），找出所有 `.sln`、`.slnx`、`.csproj`、`.vbproj`。`bin`、`obj`、`node_modules`、`packages`、以 `.` 開頭的資料夾，以及目錄連接點（junction）與符號連結不掃描。掃描最多檢查 20,000 個資料夾；另有 10 秒的時間上限，只在慢速網路磁碟上才會用到。達到上限時 clrdiag 印出提示，清單可能不完整，這時請用 `--project` 或 `--root`。
 
 clrdiag 依下列順序決定要用哪個專案：
 
@@ -82,9 +82,11 @@ clrdiag 依下列順序決定要用哪個專案：
 - `--init`、`--install-skill`：寫入往上搜尋得到的專案根目錄。
 - `--output`：不讀專案設定。
 
-`--project`／`--pick` 搭配上述模式，或 `--root`／`--config` 搭配 `--projects`、`--set-default`、`--clear-default` 時，不生效的旗標會以黃色警告列出。
+`--project`／`--pick` 搭配上述模式，或 `--root`／`--config` 搭配 `--projects`、`--set-default`、`--clear-default` 時，不生效的旗標會以警告列出。
 
-預設專案與上次執行的專案存在 `%LOCALAPPDATA%\clrdiag\projects.json`，以工作目錄為鍵。只有互動儀表板會記錄上次執行的專案。記錄的檔案已刪除時，下一次互動執行會把它移除。每次寫入時，clrdiag 移除工作目錄已不存在的記錄，並只保留最近變更的 100 筆。檔案無法讀取時不寫入；JSON 損毀時先改名為 `projects.json.bak` 再寫入新檔。
+互動儀表板以黃色在主控台印出警告與提示；其他模式把它們以純文字寫到標準錯誤（stderr），標準輸出只留給批次結果。例如 `--pipe-name` 的標準輸出只有管道名稱。
+
+預設專案與上次執行的專案存在 `%LOCALAPPDATA%\clrdiag\projects.json`，以工作目錄為鍵。只有互動儀表板會記錄上次執行的專案。記錄的檔案已刪除時，下一次互動執行在選定專案後一次移除這些記錄；在選單選「取消」時不寫入。每次寫入時，clrdiag 只保留最近變更的 100 筆記錄，不檢查工作目錄是否存在，所以離線的隨身碟、網路磁碟或 VPN 路徑的記錄會保留。檔案無法讀取時不寫入；JSON 損毀時先改名為 `projects.json.<時間>.bak` 再寫入新檔，最多保留 3 份備份。
 
 已知限制：`--send` 等批次指令依「預設專案 → 上次執行」決定專案。工作目錄設有預設專案 A，而儀表板是用 `--pick` 選 B 啟動時，`clrdiag --send` 連到的是 A 的管道。這時請加上 `--project B`。
 

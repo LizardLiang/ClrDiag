@@ -34,8 +34,11 @@ public static class ProjectDiscovery
     /// <summary>一次掃描最多檢查的資料夾數。</summary>
     public const int DefaultMaxFolders = 20_000;
 
-    /// <summary>一次掃描的時間上限。</summary>
-    public static readonly TimeSpan DefaultTimeBudget = TimeSpan.FromSeconds(2);
+    /// <summary>
+    /// 一次掃描的時間上限。資料夾數上限是主要的停止條件，讓掃描結果不受機器負載影響；
+    /// 這個時間上限只防止慢速網路磁碟讓啟動停住，正常的工作目錄在資料夾數上限內就會走完。
+    /// </summary>
+    public static readonly TimeSpan DefaultTimeBudget = TimeSpan.FromSeconds(10);
 
     /// <summary>掃描達到上限時提示使用者的訊息。</summary>
     public const string TruncatedNotice =
@@ -57,7 +60,8 @@ public static class ProjectDiscovery
 
     /// <summary>
     /// 以廣度優先掃描 workingDir 與其子資料夾。workingDir 本身是第 0 層，
-    /// 第 maxDepth 層的資料夾仍會檢查，更深的不再進入。無法讀取的資料夾直接略過。
+    /// 第 maxDepth 層的資料夾仍會檢查，更深的不再進入。無法讀取的資料夾直接略過；
+    /// 連結點與符號連結（reparse point）的資料夾不進入，避免重複列出專案或繞成迴圈。
     /// 檢查的資料夾數達到 maxFolders 或耗時超過 timeBudget（預設 DefaultTimeBudget）時停止，
     /// 回傳已找到的專案並把 Truncated 設為 true；廣度優先讓淺層的專案先被找到。
     /// </summary>
@@ -87,31 +91,25 @@ public static class ProjectDiscovery
 
             var (folder, depth) = pending.Dequeue();
             visited++;
-            string[] files;
-            string[] subFolders;
             try
             {
-                files = Directory.GetFiles(folder);
-                subFolders = depth < maxDepth ? Directory.GetDirectories(folder) : Array.Empty<string>();
-            }
-            catch (Exception ex) when (ex is UnauthorizedAccessException or IOException)
-            {
-                continue;
-            }
+                var directory = new DirectoryInfo(folder);
+                foreach (var file in directory.EnumerateFiles())
+                {
+                    if (IsProjectFile(file.FullName))
+                        results.Add(Describe(root, file.FullName));
+                }
 
-            foreach (var file in files)
-            {
-                if (IsProjectFile(file))
-                    results.Add(Describe(root, file));
-            }
-
-            foreach (var subFolder in subFolders)
-            {
-                var name = Path.GetFileName(subFolder);
-                if (name.StartsWith('.') || SkippedFolders.Contains(name))
+                if (depth >= maxDepth)
                     continue;
-                pending.Enqueue((subFolder, depth + 1));
+
+                foreach (var subFolder in directory.EnumerateDirectories())
+                {
+                    if (ShouldEnter(subFolder))
+                        pending.Enqueue((subFolder.FullName, depth + 1));
+                }
             }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or IOException) { }
         }
 
         SortByPath(results);
@@ -135,8 +133,7 @@ public static class ProjectDiscovery
             if (string.IsNullOrEmpty(path) || !File.Exists(path) || !IsProjectFile(path))
                 continue;
 
-            var relative = Path.GetRelativePath(root, path);
-            if (relative.StartsWith("..", StringComparison.Ordinal) || Path.IsPathRooted(relative))
+            if (!IsInside(root, path))
                 continue;
 
             if (results.Any(p => string.Equals(p.FullPath, path, StringComparison.OrdinalIgnoreCase)))
@@ -204,8 +201,32 @@ public static class ProjectDiscovery
     private static bool IsProjectFile(string path) =>
         DiagConfig.ProjectExtensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>path 相對於 root 的路徑，一律以 / 分隔；專案清單與狀態列共用這個格式。</summary>
+    public static string RelativePathOf(string root, string path) =>
+        Path.GetRelativePath(root, path).Replace('\\', '/');
+
+    /// <summary>
+    /// path 是否位於 root 底下：相對路徑的第一段是「..」或相對路徑仍是絕對路徑（不同磁碟）時不算。
+    /// 以完整路徑段比對，名稱以「..」開頭的資料夾（例如 ..foo）仍算在 root 底下。
+    /// </summary>
+    public static bool IsInside(string root, string path)
+    {
+        var relative = Path.GetRelativePath(root, path);
+        if (Path.IsPathRooted(relative))
+            return false;
+
+        var firstSegment = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)[0];
+        return firstSegment != "..";
+    }
+
+    /// <summary>掃描是否進入這個子資料夾：略過清單中的名稱、以「.」開頭的資料夾與 reparse point。</summary>
+    private static bool ShouldEnter(DirectoryInfo folder) =>
+        !folder.Name.StartsWith('.')
+        && !SkippedFolders.Contains(folder.Name)
+        && !folder.Attributes.HasFlag(FileAttributes.ReparsePoint);
+
     private static DiscoveredProject Describe(string root, string file) =>
-        new(file, Path.GetRelativePath(root, file).Replace('\\', '/'), Path.GetFileNameWithoutExtension(file));
+        new(file, RelativePathOf(root, file), Path.GetFileNameWithoutExtension(file));
 
     private static void SortByPath(List<DiscoveredProject> projects) =>
         projects.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.RelativePath, b.RelativePath));

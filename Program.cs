@@ -123,23 +123,15 @@ for (int i = 0; i < args.Length; i++)
             installSkillMode = true;
             // 範圍是必填；這裡先收下值，缺漏或拼錯留到迴圈後統一報錯，
             // 才能印出這個旗標自己的用法而不是整份說明
-            if (i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
-            {
-                installSkillScope = args[++i];
-            }
-
+            installSkillScope = TakeValue(args, ref i);
             break;
         case "--force":
             force = true;
             break;
         case "--build":
             buildMode = true;
-            // 後面若不是另一個參數，就當成建置設定名稱（--build Release）
-            if (i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
-            {
-                buildConfiguration = args[++i];
-            }
-
+            // 建置設定名稱可省略；後面若不是另一個參數，就當成建置設定名稱（--build Release）
+            buildConfiguration = TakeValue(args, ref i);
             break;
         case "--width" when i + 1 < args.Length:
             renderWidth = int.Parse(args[++i]);
@@ -195,28 +187,12 @@ bool explicitRoot = root is not null || configPath is not null;
 // --init 與 --install-skill 寫入往上搜尋得到的專案根目錄。
 bool usesDiscovery = ProjectSelection.UsesDiscovery(outputMode, initMode, skillScope is not null);
 
-foreach (
-    string warning in ProjectSelection.ConflictWarnings(
-        explicitRoot,
-        projectQuery is not null || pickMode,
-        projectCommandMode,
-        usesDiscovery
-    )
-)
-{
-    PrintNotice(warning);
-}
-
-if (projectCommandMode)
-{
-    return RunProjectCommand(projectStore, workingDir, projectsMode, setDefaultQuery, clearDefaultMode);
-}
-
-// 互動 = 沒有任何批次旗標、輸入輸出都接在真正的主控台上，且 Spectre 判斷終端機可互動；
+// 互動 = 沒有任何批次旗標或專案管理指令、輸入輸出都接在真正的主控台上，且 Spectre 判斷終端機可互動；
 // 只有互動時才會顯示選單、寫入記錄；不可互動時與批次模式一樣解析專案。
 // 這裡位於上面的 UTF-8 設定之後才讀取 AnsiConsole.Profile，符合該處說明的初始化順序。
 bool interactive = ProjectSelection.IsInteractive(
     batchOutputMode
+        || projectCommandMode
         || listMode
         || initMode
         || buildMode
@@ -229,6 +205,31 @@ bool interactive = ProjectSelection.IsInteractive(
     () => AnsiConsole.Profile.Capabilities.Interactive
 );
 
+// 提示訊息：互動模式以黃色印在主控台；非互動模式以純文字寫到標準錯誤，標準輸出只留給批次結果
+// （例如 --pipe-name 的第一行就是管道名稱，編輯器外掛直接讀取）。
+var notices = new NoticeWriter(
+    interactive,
+    Console.Error,
+    message => AnsiConsole.MarkupLine($"[yellow]{Markup.Escape(message)}[/]")
+);
+
+foreach (
+    string warning in ProjectSelection.ConflictWarnings(
+        explicitRoot,
+        projectQuery is not null || pickMode,
+        projectCommandMode,
+        usesDiscovery
+    )
+)
+{
+    notices.Write(warning);
+}
+
+if (projectCommandMode)
+{
+    return RunProjectCommand(projectStore, workingDir, projectsMode, setDefaultQuery, clearDefaultMode, notices);
+}
+
 DiscoveredProject? chosenProject = null;
 string? chosenProjectLabel = null;
 if (!explicitRoot && usesDiscovery)
@@ -240,7 +241,7 @@ if (!explicitRoot && usesDiscovery)
         pickMode,
         interactive,
         ProjectPicker.Pick,
-        PrintNotice
+        notices.Write
     );
 
     if (selection.Error is { } miss)
@@ -410,7 +411,7 @@ if (chosenProject is not null)
 {
     if (interactive && !projectStore.SetLastRun(workingDir, chosenProject.FullPath))
     {
-        PrintStoreWriteFailure(projectStore, fatal: false);
+        notices.Write(projectStore.WriteFailureMessage);
     }
 
     startupStatus = ProjectSelection.StartupStatus(chosenProject, chosenProjectLabel, config, workingDir);
@@ -487,6 +488,8 @@ static int? ResolveTarget(DiagConfig config, int? pid)
 
 /// <summary>
 /// 取出旗標後面的值並把 i 前移；沒有下一個參數或下一個參數是另一個旗標（-- 開頭）時回傳 null，i 不變。
+/// 值是否必填由呼叫端決定：--project / --set-default 以 MissingValue 報錯，
+/// --build 的建置設定名稱可省略，--install-skill 的範圍缺漏時印出自己的用法。
 /// </summary>
 static string? TakeValue(string[] args, ref int i)
 {
@@ -504,9 +507,6 @@ static int MissingValue(string flag)
     AnsiConsole.MarkupLine($"[red]{Markup.Escape(flag)} 需要專案名稱或相對路徑[/]");
     return 2;
 }
-
-/// <summary>非致命的提示訊息（黃色），例如旗標衝突、掃描上限、記錄寫入失敗。</summary>
-static void PrintNotice(string message) => AnsiConsole.MarkupLine($"[yellow]{Markup.Escape(message)}[/]");
 
 /// <summary>印出比對失敗的訊息與候選專案的相對路徑；沒有候選時說明工作目錄底下沒有專案。</summary>
 static void PrintProjectCandidates(ProjectMiss miss)
@@ -526,17 +526,9 @@ static void PrintProjectCandidates(ProjectMiss miss)
     }
 }
 
-/// <summary>專案記錄寫入失敗時的訊息：管理指令視為錯誤（紅色），其餘流程只提示（黃色）。</summary>
-static void PrintStoreWriteFailure(ProjectStateStore store, bool fatal)
-{
-    if (fatal)
-    {
-        AnsiConsole.MarkupLine($"[red]{Markup.Escape(store.WriteFailureMessage)}[/]");
-        return;
-    }
-
-    PrintNotice(store.WriteFailureMessage);
-}
+/// <summary>專案管理指令寫入記錄失敗時的錯誤訊息（紅色）；其餘流程的寫入失敗交給 NoticeWriter 提示。</summary>
+static void PrintStoreWriteError(ProjectStateStore store) =>
+    AnsiConsole.MarkupLine($"[red]{Markup.Escape(store.WriteFailureMessage)}[/]");
 
 /// <summary>
 /// --clear-default、--set-default、--projects：管理工作目錄的預設專案並列出偵測到的專案。
@@ -547,14 +539,15 @@ static int RunProjectCommand(
     string workingDir,
     bool list,
     string? setDefaultQuery,
-    bool clearDefault
+    bool clearDefault,
+    NoticeWriter notices
 )
 {
     if (clearDefault)
     {
         if (!store.ClearDefault(workingDir))
         {
-            PrintStoreWriteFailure(store, fatal: true);
+            PrintStoreWriteError(store);
             return 1;
         }
 
@@ -569,7 +562,7 @@ static int RunProjectCommand(
     ScanResult scan = ProjectDiscovery.Scan(workingDir);
     if (scan.Truncated)
     {
-        PrintNotice(ProjectDiscovery.TruncatedNotice);
+        notices.Write(ProjectDiscovery.TruncatedNotice);
     }
 
     if (setDefaultQuery is not null)
@@ -601,7 +594,7 @@ static int ApplySetDefault(
 
     if (!store.SetDefault(workingDir, match.Hit.FullPath))
     {
-        PrintStoreWriteFailure(store, fatal: true);
+        PrintStoreWriteError(store);
         return 1;
     }
 

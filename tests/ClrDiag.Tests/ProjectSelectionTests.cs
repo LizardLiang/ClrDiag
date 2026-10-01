@@ -229,6 +229,61 @@ public sealed class ProjectSelectionTests : IDisposable
     }
 
     [Fact]
+    public void Resolve_選單取消時不移除已失效的記錄也不寫檔()
+    {
+        TwoProjects();
+        var store = new ProjectStateStore(StorePath);
+        var gone = _tree.File("work/Gone/Gone.csproj");
+        Directory.CreateDirectory(WorkDir);
+        store.SetDefault(WorkDir, gone);
+        store.SetLastRun(WorkDir, gone);
+        File.Delete(gone);
+        var before = File.ReadAllText(StorePath);
+        var stamp = DateTime.UtcNow.AddHours(-1);
+        File.SetLastWriteTimeUtc(StorePath, stamp);
+
+        var result = Resolve(store, prompt: _ => null);
+
+        Assert.Equal(ProjectSelection.CancelExitCode, result.ExitCode);
+        Assert.Equal(before, File.ReadAllText(StorePath));
+        Assert.Equal(stamp, File.GetLastWriteTimeUtc(StorePath));
+    }
+
+    [Fact]
+    public void Resolve_選定專案後同時移除已失效的預設與上次執行()
+    {
+        TwoProjects();
+        var store = new ProjectStateStore(StorePath);
+        var gone = _tree.File("work/Gone/Gone.csproj");
+        Directory.CreateDirectory(WorkDir);
+        store.SetDefault(WorkDir, gone);
+        store.SetLastRun(WorkDir, gone);
+        File.Delete(gone);
+
+        var result = Resolve(store, prompt: projects => new ProjectPick(projects[0], false));
+
+        Assert.Equal("A/A.csproj", result.Project?.RelativePath);
+        Assert.Equal(ProjectState.Empty, store.Get(WorkDir));
+        Assert.Empty(_notices);
+    }
+
+    [Fact]
+    public void Resolve_預設專案失效時選單設為預設保留新的預設()
+    {
+        TwoProjects();
+        var store = new ProjectStateStore(StorePath);
+        var gone = _tree.File("work/Gone/Gone.csproj");
+        Directory.CreateDirectory(WorkDir);
+        store.SetDefault(WorkDir, gone);
+        File.Delete(gone);
+
+        var result = Resolve(store, prompt: projects => new ProjectPick(projects[1], true));
+
+        Assert.Equal(result.Project!.FullPath, store.Get(WorkDir).Default);
+        Assert.Equal("選單，已設為預設", result.Label);
+    }
+
+    [Fact]
     public void Resolve_批次模式不移除已失效的記錄()
     {
         _tree.File("work/A/A.csproj");
