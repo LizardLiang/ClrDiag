@@ -73,6 +73,20 @@ public static class ManagedProcessFinder
         return candidates.Count == 0 ? null : candidates[0].Pid;
     }
 
+    /// <summary>判斷指定 PID 是否為載入 .NET 執行階段的行程；行程不存在或無法檢查回傳 null。</summary>
+    public static string? RuntimeOf(int pid)
+    {
+        try
+        {
+            using Process process = Process.GetProcessById(pid);
+            return DetectRuntime(process);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     /// <summary>
     /// 以載入的模組判斷行程使用哪個執行階段：
     /// clr.dll = .NET Framework、coreclr.dll = .NET Core / .NET 5+。

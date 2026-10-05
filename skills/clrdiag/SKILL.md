@@ -53,7 +53,9 @@ at most 30 rows. It exits with code 1 when no managed process is running. When
 process instead.
 
 **Target selection.** Every batch command accepts `--pid N`. Without `--pid`, the
-tool picks the best match from `processNames`. Pass `--pid` whenever more than one
+tool picks the best match from `processNames`. The dashboard does not pick an
+unrelated process: with empty `processNames` it adopts only the managed process that
+listens on the configured port. Pass `--pid` whenever more than one
 candidate exists. Ambiguity produces a correct report about the wrong process.
 
 **Working directory.** Without `--root` or `--config`, the tool scans down the
@@ -153,7 +155,7 @@ Every field is optional. JSON comments and trailing commas are accepted.
 | `serveArguments` | Server argument array. Supports placeholders. |
 | `port` | Default port. Default `5000`. `--port` overrides it. |
 | `probeUrl` | Health probe URL. Supports `{port}`. Default `http://localhost:{port}/`. |
-| `processNames` | Process names to find. Empty means scan every process that loaded the CLR. |
+| `processNames` | Process names to find. Empty means `--list` and the picker scan every process that loaded the CLR. The dashboard adopts only the managed process that listens on `port`. It adopts nothing when no process listens there, and it logs the reason in tab 6. |
 | `appNamespaces` | Namespace prefixes counted as "own code". Empty means approximate by "not a framework type". |
 | `reportDirectory` | CSV output directory. Default `.clrdiag-reports`. |
 | `dapEnabled` | Enable the debug features. Default `true`. `false` spawns nothing and opens no pipe. |

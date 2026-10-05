@@ -838,7 +838,12 @@ public sealed partial class DiagApp
         int end = Math.Max(0, all.Length - logScroll);
         int start = Math.Max(0, end - visible);
 
-        var lines = new List<string>();
+        // 時間、來源各佔固定欄，訊息放在自己的欄位：長訊息折行時續行會對齊訊息欄而不是頂到最左邊
+        var grid = new Grid();
+        grid.AddColumn(new GridColumn().NoWrap().PadRight(1));
+        grid.AddColumn(new GridColumn().NoWrap().PadRight(1));
+        grid.AddColumn(new GridColumn());
+
         for (int i = start; i < end; i++)
         {
             LogLine line = all[i];
@@ -851,17 +856,19 @@ public sealed partial class DiagApp
                 _ => Format.Muted,
             };
 
-            lines.Add(
-                $"[{Format.Muted}]{line.TimeStamp:HH:mm:ss}[/] [{color}]{line.Source, -5}[/] {Format.Esc(line.Text)}"
+            grid.AddRow(
+                new Markup($"[{Format.Muted}]{line.TimeStamp:HH:mm:ss}[/]"),
+                new Markup($"[{color}]{Format.Esc(line.Source)}[/]"),
+                new Markup(Format.Esc(line.Text))
             );
         }
 
-        if (lines.Count == 0)
+        if (end <= start)
         {
-            lines.Add($"[{Format.Muted}](尚無訊息)[/]");
+            grid.AddRow(new Markup($"[{Format.Muted}](尚無訊息)[/]"), new Markup(""), new Markup(""));
         }
 
-        return new Panel(new Markup(string.Join('\n', lines)))
+        return new Panel(grid)
             .Header(
                 ViewHeader(
                     PaneOf(DiagView.Log),

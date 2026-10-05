@@ -108,8 +108,42 @@ public sealed class ServerService : IDisposable
         }
     }
 
-    /// <summary>找出可監看的受控行程（依設定的行程名稱，否則掃描所有載入 CLR 的行程）。</summary>
-    public int? FindExistingServer() => ManagedProcessFinder.FindBest(config.ProcessNames);
+    /// <summary>
+    /// 找出要接管的既有行程。設定了 processNames 就只在這些名稱裡挑（找不到不退回掃描全部，
+    /// 避免接管無關的受控行程）；沒設定時只接管監聽設定連接埠的受控行程，找不到就不接管並把原因寫進記錄。
+    /// </summary>
+    public int? FindExistingServer()
+    {
+        if (config.ProcessNames.Length > 0)
+        {
+            List<ManagedProcessInfo> named = ManagedProcessFinder.List(config.ProcessNames);
+            return named.Count == 0 ? null : named[0].Pid;
+        }
+
+        int? owner = PortOwnerFinder.FindListenerPid(Port);
+        if (owner is null)
+        {
+            log.Add(
+                "serve",
+                LogKind.Info,
+                $"連接埠 {Port} 沒有行程監聽，未接管任何行程（未設定 processNames，不會任選載入 CLR 的行程）"
+            );
+            return null;
+        }
+
+        string? runtime = ManagedProcessFinder.RuntimeOf(owner.Value);
+        if (runtime is null)
+        {
+            log.Add(
+                "serve",
+                LogKind.Warning,
+                $"連接埠 {Port} 由 PID {owner} 監聽，但它不是可監看的 64 位元受控行程，未接管"
+            );
+            return null;
+        }
+
+        return owner;
+    }
 
     /// <summary>掛上外部既有的行程（attach-only 模式）。</summary>
     public void AdoptExisting(int pid)

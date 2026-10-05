@@ -58,7 +58,7 @@ public sealed record DiagConfig
 
     // --- 監看目標 ---
 
-    /// <summary>要尋找的行程名稱（不含 .exe），依序比對。空陣列 = 列出所有受控行程讓使用者挑。</summary>
+    /// <summary>要尋找的行程名稱（不含 .exe），依序比對。空陣列 = 列出所有受控行程讓使用者挑；儀表板只自動接管監聽 Port 的受控行程。</summary>
     public string[] ProcessNames { get; init; } = Array.Empty<string>();
 
     /// <summary>視為「自己的程式碼」的命名空間前綴，用於標記執行緒與堆疊。空 = 以「非框架」判斷。</summary>

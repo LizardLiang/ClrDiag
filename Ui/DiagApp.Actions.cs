@@ -23,7 +23,7 @@ public sealed partial class DiagApp
                 .ConfigureAwait(false);
             status = result.Success
                 ? $"建置成功（{Format.Duration(result.Duration)}，警告 {result.WarningCount}）"
-                : $"建置失敗：{result.Errors.Count} 個錯誤（按 4 看完整輸出）";
+                : $"建置失敗：{result.Errors.Count} 個錯誤（按 6 看完整記錄）";
         });
     }
 
@@ -53,7 +53,7 @@ public sealed partial class DiagApp
             }
             else
             {
-                status = "伺服器啟動失敗（按 4 看輸出）";
+                status = "伺服器啟動失敗（按 6 看記錄）";
             }
         });
     }
@@ -227,7 +227,7 @@ public sealed partial class DiagApp
             }
             else
             {
-                status = "建置成功但伺服器啟動失敗（按 4 看輸出）";
+                status = "建置成功但伺服器啟動失敗（按 6 看記錄）";
             }
         });
     }
