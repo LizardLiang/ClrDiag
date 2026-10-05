@@ -1,21 +1,13 @@
 using System.Net;
 using System.Net.Sockets;
 using ClrDiag.Core;
+using static ClrDiag.Tests.TestPorts;
 
 namespace ClrDiag.Tests;
 
 /// <summary>接管既有行程：只認監聽設定連接埠的受控行程，認不出來就不接管並寫入原因。</summary>
 public sealed class ServerAdoptionTests
 {
-    private static int FreePort()
-    {
-        var probe = new TcpListener(IPAddress.Loopback, 0);
-        probe.Start();
-        int port = ((IPEndPoint)probe.LocalEndpoint).Port;
-        probe.Stop();
-        return port;
-    }
-
     private static int? SingleListener(int port)
     {
         IReadOnlyList<int>? pids = PortOwnerFinder.FindListenerPids(port);

@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 
 namespace ClrDiag.Core;
 
-/// <summary>辨識或啟動失敗的原因類別，測試與呼叫端依它判斷，不比對記錄文字。</summary>
+/// <summary>辨識、啟動或停止失敗的原因類別，測試與呼叫端依它判斷，不比對記錄文字。</summary>
 public enum ServerFailure
 {
     None,
@@ -25,6 +25,7 @@ public enum ServerFailure
     StartCancelled,
     PortAlreadyListening,
     StopFailed,
+    DebugSessionActive,
 }
 
 /// <summary>辨識結果：Pid 為 null 表示沒有辨識出伺服器行程，Reason 是要寫進 6 記錄的原因，Failure 是原因類別。</summary>
@@ -124,15 +125,15 @@ public sealed record LocatorProbes(
 ///
 /// 依據是監聽設定連接埠的行程（PortOwnerFinder），而且只接受：
 ///   - 受控行程（RuntimeOf 看得到 CLR）、64 位元；
-///   - 啟動時（startedRootPid 不為 null）還必須是啟動的行程本身或它的後代，
+///   - 啟動時（startedRootPid 不為 null）還必須是啟動的行程本身或它的後代行程，
 ///     不會因為連接埠被別的行程佔用而接管到無關的行程；
 ///   - 設定了 processNames 時，行程映像名稱必須在清單內。
 /// 連接埠沒人監聽、查詢失敗、有多個不同的監聽行程、擁有者不是受控行程，一律不接管並回傳原因。
 ///
 /// HTTP.sys（IIS Express、w3wp）的監聽記在系統行程 PID 4 名下，看不出站台行程是誰，
 /// 一律要設定 processNames（沒設定就立即失敗並說明）：
-///   - 啟動時：從啟動的行程樹裡挑名稱符合、64 位元的行程，剛好一個才接管
-///     （站台行程可能還沒載入 CLR，所以只看名稱）；
+///   - 啟動時：從啟動的行程樹（啟動的行程與它的後代行程）裡挑名稱符合、64 位元的行程，剛好一個才接管
+///     （站台行程可能還沒載入 CLR，所以只看名稱）；命令列的 /port: 寫了別的連接埠的行程服務的是別的站台，排除；
 ///   - 接管既有行程時：依名稱找行程，用命令列的 /port: 比對連接埠。
 ///     /port: 等於設定連接埠的行程是證據：它是 32 位元或還沒載入 CLR 就回報該原因，不接管別的行程；
 ///     /port: 是別的連接埠的排除；沒有證據時，命令列讀得到、沒有 /port:、64 位元且已載入 CLR 的行程
@@ -147,8 +148,12 @@ public static partial class ServerLocator
     [GeneratedRegex(@"[/-]port:(\d+)", RegexOptions.IgnoreCase)]
     private static partial Regex PortArgument();
 
-    /// <summary>失敗後繼續輪詢也不會成功的原因（設定不足），啟動流程據此立即放棄而不等到逾時。</summary>
-    public static bool IsFatal(ServerFailure failure) => failure == ServerFailure.HttpSysNeedsProcessNames;
+    /// <summary>
+    /// 失敗後繼續輪詢也不會成功的原因，啟動流程據此立即放棄而不等到逾時：設定不足，
+    /// 或伺服器行程是 32 位元（本工具無法診斷，行程不會自己變成 64 位元）。
+    /// </summary>
+    public static bool IsFatal(ServerFailure failure) =>
+        failure is ServerFailure.HttpSysNeedsProcessNames or ServerFailure.Wow64;
 
     /// <summary>
     /// 辨識伺服器行程。startedRootPid 為本工具剛啟動的行程 PID（啟動流程）；null 表示接管既有行程。
@@ -207,7 +212,7 @@ public static partial class ServerLocator
             return Fail(
                 LogKind.Warning,
                 ServerFailure.NotInStartedTree,
-                $"連接埠 {port} 由 {label} 監聽，它不是本工具啟動的行程或其子行程，未接管"
+                $"連接埠 {port} 由 {label} 監聽，它不是本工具啟動的行程或其後代行程，未接管"
             );
         }
 
@@ -302,7 +307,7 @@ public static partial class ServerLocator
             return Fail(
                 LogKind.Warning,
                 ServerFailure.MultipleCandidates,
-                $"連接埠 {port} 由 HTTP.sys 監聽，啟動的行程樹內有多個符合的行程（PID {string.Join("、", candidates)}），無法判斷哪一個是站台，未接管；請用 p 鍵 / --pid 指定"
+                $"連接埠 {port} 由 HTTP.sys 監聽，啟動的行程與後代行程內有多個符合的行程（PID {string.Join("、", candidates)}），無法判斷哪一個是站台，未接管；請用 p 鍵 / --pid 指定"
             );
         }
 
@@ -314,7 +319,7 @@ public static partial class ServerLocator
         return Fail(
             LogKind.Warning,
             ServerFailure.NoServingProcess,
-            $"連接埠 {port} 由 HTTP.sys 監聽，但啟動的行程樹內（PID {string.Join("、", tree)}）還沒有名稱在 processNames（{string.Join("、", processNames)}）內的行程"
+            $"連接埠 {port} 由 HTTP.sys 監聽，但啟動的行程與後代行程內（PID {string.Join("、", tree)}）還沒有名稱在 processNames（{string.Join("、", processNames)}）內的行程"
         );
     }
 

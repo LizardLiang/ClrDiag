@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace ClrDiag.Core;
@@ -15,6 +16,8 @@ namespace ClrDiag.Core;
 /// 不列舉模組，開銷跟系統行程數量無關，微秒級的呼叫拿來做 20ms 高頻輪詢完全沒問題；
 /// 用「是不是 wrapper 的直接子行程」取代「是不是新出現的候選行程」，語意上也更精準——
 /// 不需要 CLR 已經載入才能被看見，行程一建立就能偵測到。
+/// DescendantsOf 為了核對父子的建立時間，會對有父 PID 連結的行程短暫開啟控制代碼讀建立時間，
+/// 只在辨識與清除時呼叫，不在 20ms 的輪詢路徑上。
 /// </summary>
 public static class ChildProcessFinder
 {
@@ -60,29 +63,86 @@ public static class ChildProcessFinder
     /// 回傳 rootPid 底下所有後代行程的 PID（不含 rootPid 本身）。同一份快照一次走完整棵樹，
     /// 沿著「父 PID」連結往下找。Windows 的父 PID 在父行程結束後不會更新，所以 rootPid 本身
     /// 已結束時，記著它 PID 的直接子行程仍找得到；但中間行程已結束時，它底下的孫行程接不到
-    /// rootPid（快照裡沒有那個中間行程），找不到。PID 被重複使用時結果可能含無關行程，
-    /// 呼叫端結束行程前要自行核對建立時間。
+    /// rootPid（快照裡沒有那個中間行程），找不到。
+    /// PID 會被重複使用，所以父子連結要同時滿足「子行程的建立時間不早於父行程」才算數
+    /// （與 .NET Process 判斷父子關係的規則相同）：記著舊父 PID 的無關行程不會被接進樹裡。
+    /// 讀不到建立時間的子行程無法核對也無法結束，不列入；父行程（例如已結束的 rootPid）
+    /// 讀不到建立時間時，只能憑 PID 連結。
     /// </summary>
-    public static HashSet<int> DescendantsOf(int rootPid)
+    public static HashSet<int> DescendantsOf(int rootPid) => Descendants(rootPid, ReadParentMap(), StartTimeOf);
+
+    /// <summary>後代判斷本體；父 PID 對照與建立時間查詢由參數提供，供測試用假資料驗證。</summary>
+    internal static HashSet<int> Descendants(
+        int rootPid,
+        IReadOnlyDictionary<int, int> parents,
+        Func<int, DateTime?> startOf
+    )
     {
-        Dictionary<int, int> parents = ReadParentMap();
         var result = new HashSet<int>();
         var pending = new Queue<int>();
         pending.Enqueue(rootPid);
         while (pending.Count > 0)
         {
             int current = pending.Dequeue();
+            DateTime? parentStart = null;
+            bool parentStartRead = false;
             foreach (KeyValuePair<int, int> pair in parents)
             {
                 // PID 可能被重複使用而形成環，已經走過的不再加入
-                if (pair.Value == current && pair.Key != rootPid && result.Add(pair.Key))
+                if (pair.Value != current || pair.Key == rootPid || result.Contains(pair.Key))
                 {
-                    pending.Enqueue(pair.Key);
+                    continue;
                 }
+
+                if (startOf(pair.Key) is not { } childStart)
+                {
+                    continue;
+                }
+
+                if (!parentStartRead)
+                {
+                    parentStart = startOf(current);
+                    parentStartRead = true;
+                }
+
+                if (parentStart is { } start && childStart < start)
+                {
+                    continue;
+                }
+
+                result.Add(pair.Key);
+                pending.Enqueue(pair.Key);
             }
         }
 
         return result;
+    }
+
+    /// <summary>行程建立時間；行程不存在或沒有權限讀取時回傳 null。</summary>
+    internal static DateTime? StartTimeOf(int pid)
+    {
+        try
+        {
+            using Process process = Process.GetProcessById(pid);
+            return SafeStartTime(process);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>已取得的行程物件的建立時間；讀不到（已結束、沒有權限）回傳 null。</summary>
+    internal static DateTime? SafeStartTime(Process process)
+    {
+        try
+        {
+            return process.StartTime;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>讀取一份行程快照，回傳 PID → 父 PID 對照；快照失敗回傳空表。</summary>

@@ -140,9 +140,9 @@ public sealed partial class DiagApp
             backgroundWork = Task.Run(async () =>
             {
                 await dap.DisconnectAsync(cts.Token).ConfigureAwait(false);
-                // wrapper 啟動（dotnet run 類）才會留下 wrapper 行程；直接 launch 沒有 wrapper
-                // 可清，這裡呼叫也安全。子行程已由上面的 disconnect 連帶終止。
-                server.CleanupDebugWrapper();
+                // 結束本工具啟動的行程（除錯啟動的 wrapper，或 s 啟動的伺服器）；沒有啟動過行程時略過。
+                // 除錯目標的子行程已由上面的 disconnect 連帶終止。
+                server.CleanupStartedProcess();
                 monitor.Attach(null);
                 status = "已透過除錯器停止伺服器";
             });
@@ -187,7 +187,7 @@ public sealed partial class DiagApp
             {
                 status = "停止除錯階段…";
                 await dap.DisconnectAsync(cts.Token).ConfigureAwait(false);
-                server.CleanupDebugWrapper(); // wrapper 啟動才有東西可清，直接 launch 呼叫也安全
+                server.CleanupStartedProcess(); // 結束本工具啟動的行程；沒有啟動過行程時略過
                 monitor.Attach(null);
             }
             else if (server.ServerPid is not null)

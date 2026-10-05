@@ -725,10 +725,10 @@ public sealed partial class DiagApp : IDisposable
         cts.Cancel();
         dapPipe?.Dispose();
         dap.Dispose();
-        // 跟 StopServer／RestartWithBuild 同一個收尾順序：wrapper 啟動（dotnet run 類）才會
-        // 留下 wrapper 行程，直接 launch 沒有 wrapper 可清，這裡呼叫也安全。少了這一行，
-        // 用 q／Ctrl+C 結束時 wrapper 型 serveCommand 的 dotnet run 行程會被留下孤兒行程。
-        server.CleanupDebugWrapper();
+        // 跟 StopServer／RestartWithBuild 同一個收尾順序：結束本工具啟動的行程（s 或除錯啟動的
+        // serveCommand 行程，連同後代）。接管既有行程、沒有啟動過行程時沒有東西可清。
+        // 少了這一行，用 q／Ctrl+C 結束時 dotnet run 這類 wrapper 行程會被留下成孤兒行程。
+        server.CleanupStartedProcess();
         monitor.Dispose();
         server.Dispose();
         debugOutput.Dispose();

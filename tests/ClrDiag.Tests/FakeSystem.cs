@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using ClrDiag.Core;
 
 namespace ClrDiag.Tests;
@@ -41,5 +43,19 @@ internal sealed class FakeSystem
         {
             Wow64.Add(pid);
         }
+    }
+}
+
+/// <summary>測試用的連接埠工具。</summary>
+internal static class TestPorts
+{
+    /// <summary>挑一個目前沒人監聽的連接埠；釋放到使用之間可能被搶走，使用端要能重試。</summary>
+    public static int FreePort()
+    {
+        var probe = new TcpListener(IPAddress.Loopback, 0);
+        probe.Start();
+        int port = ((IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+        return port;
     }
 }

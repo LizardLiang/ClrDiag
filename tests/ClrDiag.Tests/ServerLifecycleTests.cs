@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using ClrDiag.Core;
+using static ClrDiag.Tests.TestPorts;
 
 namespace ClrDiag.Tests;
 
@@ -13,16 +14,6 @@ namespace ClrDiag.Tests;
 public sealed class ServerLifecycleTests
 {
     private static readonly string TestServerDll = Path.Combine(AppContext.BaseDirectory, "ClrDiag.TestServer.dll");
-
-    /// <summary>挑一個目前沒人監聽的連接埠；釋放到使用之間可能被搶走，使用端要能重試。</summary>
-    private static int FreePort()
-    {
-        var probe = new TcpListener(IPAddress.Loopback, 0);
-        probe.Start();
-        int port = ((IPEndPoint)probe.LocalEndpoint).Port;
-        probe.Stop();
-        return port;
-    }
 
     private static DiagConfig Config(string mode, params string[] extra) =>
         new()
@@ -235,7 +226,8 @@ public sealed class ServerLifecycleTests
     public async Task 啟動被取消時清除啟動的行程並還原狀態()
     {
         using ServerService server = Service(Config("idle"), new LogBuffer(), FreePort());
-        using var cts = new CancellationTokenSource();
+        // 斷言失敗時也由計時取消，不會讓啟動中的行程等滿 StartTimeout
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
 
         Task<int?> starting = server.StartAsync(null, cts.Token);
         for (int i = 0; i < 100 && server.LastStartedPid is null; i++)
@@ -258,7 +250,7 @@ public sealed class ServerLifecycleTests
     public async Task 啟動進行中再次啟動只回報執行中而不再開行程()
     {
         using ServerService server = Service(Config("idle"), new LogBuffer(), FreePort());
-        using var cts = new CancellationTokenSource();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
 
         Task<int?> starting = server.StartAsync(null, cts.Token);
         for (int i = 0; i < 100 && server.LastStartedPid is null; i++)
@@ -281,11 +273,13 @@ public sealed class ServerLifecycleTests
     [Fact]
     public async Task 停止接管的行程只結束該PID而不是同名的其他行程()
     {
-        using Process target = StartBystander(out int targetPort);
-        using Process bystander = StartBystander(out int bystanderPort);
+        Process? target = null;
+        Process? bystander = null;
         ServerService? server = null;
         try
         {
+            target = StartBystander(out int targetPort);
+            bystander = StartBystander(out int bystanderPort);
             server = new ServerService(new DiagConfig(), new LogBuffer(), targetPort);
             Assert.Equal(target.Id, server.FindExistingServer());
             server.AdoptExisting(target.Id);
@@ -301,8 +295,14 @@ public sealed class ServerLifecycleTests
         finally
         {
             server?.Dispose();
-            KillQuietly(bystander);
-            KillQuietly(target);
+            foreach (Process? process in new[] { bystander, target })
+            {
+                if (process is not null)
+                {
+                    KillQuietly(process);
+                    process.Dispose();
+                }
+            }
         }
     }
 
@@ -435,6 +435,45 @@ public sealed class ServerLifecycleTests
         finally
         {
             KillQuietly(target);
+        }
+    }
+
+    [Fact]
+    public async Task 除錯階段進行中再次啟動不結束既有的伺服器行程()
+    {
+        bool failLocate = false;
+        LocatorProbes probes = LocatorProbes.Default with
+        {
+            // 啟動後讓「連接埠已被監聽但辨識不出擁有者」成立，走接管失敗的分支
+            ListenerPids = port => failLocate ? new[] { 900, 901 } : PortOwnerFinder.FindListenerPids(port),
+        };
+        int port = FreePort();
+        using ServerService server = Service(Config("listen", "{port}"), new LogBuffer(), port, probes: probes);
+        int? pid = await server.StartAsync(null, CancellationToken.None);
+        try
+        {
+            Assert.NotNull(pid);
+            // 除錯器附加到目前的伺服器行程（例如對它按 attach），狀態變成 Debug
+            server.AdoptDebuggee(pid!.Value);
+            failLocate = true;
+
+            int? second = await server.StartAsync(null, CancellationToken.None);
+
+            Assert.True(Alive(pid.Value));
+            Assert.Null(second);
+            Assert.Equal(ServerFailure.DebugSessionActive, server.LastFailure);
+            Assert.Equal(ServerState.Debug, server.State);
+            Assert.Equal(pid, server.ServerPid);
+        }
+        finally
+        {
+            failLocate = false;
+            if (pid is not null)
+            {
+                server.AdoptExisting(pid.Value);
+            }
+
+            await server.StopAsync(CancellationToken.None);
         }
     }
 }
