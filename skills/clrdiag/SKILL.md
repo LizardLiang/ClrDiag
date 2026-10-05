@@ -155,7 +155,7 @@ Every field is optional. JSON comments and trailing commas are accepted.
 | `serveArguments` | Server argument array. Supports placeholders. |
 | `port` | Default port. Default `5000`. `--port` overrides it. |
 | `probeUrl` | Health probe URL. Supports `{port}`. Default `http://localhost:{port}/`. |
-| `processNames` | Process names to find. Empty means `--list` and the picker scan every process that loaded the CLR. The dashboard adopts only the managed process that listens on `port`. It adopts nothing when no process listens there, and it logs the reason in tab 6. |
+| `processNames` | Process names to find. Empty means `--list` and the picker scan every process that loaded the CLR. The dashboard adopts only the managed process that listens on `port`. It adopts nothing when no process listens there, and it logs the reason in tab 6. HTTP.sys sites (IIS Express, w3wp) need `processNames`. Batch commands without `--pid` still pick the largest managed process. |
 | `appNamespaces` | Namespace prefixes counted as "own code". Empty means approximate by "not a framework type". |
 | `reportDirectory` | CSV output directory. Default `.clrdiag-reports`. |
 | `dapEnabled` | Enable the debug features. Default `true`. `false` spawns nothing and opens no pipe. |

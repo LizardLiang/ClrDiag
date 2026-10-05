@@ -111,7 +111,7 @@ clrdiag 依下列順序決定要用哪個專案：
 | `serveArguments`  | 啟動參數，同樣支援佔位符                                                  |
 | `port`            | 預設連接埠（`--port` 可覆寫）                                             |
 | `probeUrl`        | 健康探測網址，支援 `{port}`                                               |
-| `processNames`    | 要尋找的行程名稱。留空 = `--list` 與 `p` 列出所有載入 CLR 的行程；儀表板啟動時只接管監聽 `port` 的受控行程，找不到就不接管（原因寫在 `6 記錄`） |
+| `processNames`    | 要尋找的行程名稱。留空 = `--list` 與 `p` 列出所有載入 CLR 的行程；儀表板啟動時只接管監聽 `port` 的受控行程，找不到就不接管（原因寫在 `6 記錄`）；IIS Express／w3wp 這類 HTTP.sys 站台請設定 `processNames`。不加 `--pid` 的批次指令仍挑工作集最大的受控行程 |
 | `appNamespaces`   | 視為「自己程式碼」的命名空間前綴。留空 = 以「非框架」近似判斷              |
 | `reportDirectory` | CSV 輸出目錄                                                              |
 | `dapEnabled`      | 是否啟用除錯功能（spawn netcoredbg、開具名管道）。預設 `true`             |

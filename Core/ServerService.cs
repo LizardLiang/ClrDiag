@@ -117,7 +117,17 @@ public sealed class ServerService : IDisposable
         if (config.ProcessNames.Length > 0)
         {
             List<ManagedProcessInfo> named = ManagedProcessFinder.List(config.ProcessNames);
-            return named.Count == 0 ? null : named[0].Pid;
+            if (named.Count == 0)
+            {
+                log.Add(
+                    "serve",
+                    LogKind.Info,
+                    $"找不到名稱為 {string.Join("、", config.ProcessNames)} 的受控行程，未接管任何行程"
+                );
+                return null;
+            }
+
+            return named[0].Pid;
         }
 
         int? owner = PortOwnerFinder.FindListenerPid(Port);
@@ -126,7 +136,18 @@ public sealed class ServerService : IDisposable
             log.Add(
                 "serve",
                 LogKind.Info,
-                $"連接埠 {Port} 沒有行程監聽，未接管任何行程（未設定 processNames，不會任選載入 CLR 的行程）"
+                $"連接埠 {Port} 查不到監聽的行程（沒有人監聽，或查詢失敗），未接管任何行程（未設定 processNames，不會任選載入 CLR 的行程）"
+            );
+            return null;
+        }
+
+        // HTTP.sys（IIS Express、w3wp）的監聽記在系統行程 PID 4 名下，看不出實際的站台行程
+        if (owner.Value == 4)
+        {
+            log.Add(
+                "serve",
+                LogKind.Warning,
+                $"連接埠 {Port} 由系統 HTTP.sys（PID 4）監聽，無法得知是哪個行程；請在 {DiagConfig.FileName} 設定 processNames（例如 iisexpress），或用 p 鍵 / --pid 指定"
             );
             return null;
         }
@@ -137,7 +158,7 @@ public sealed class ServerService : IDisposable
             log.Add(
                 "serve",
                 LogKind.Warning,
-                $"連接埠 {Port} 由 PID {owner} 監聽，但它不是可監看的 64 位元受控行程，未接管"
+                $"連接埠 {Port} 由 PID {owner} 監聽，但無法確認它是可監看的 64 位元受控行程（可能不是受控行程，或沒有權限檢查），未接管"
             );
             return null;
         }

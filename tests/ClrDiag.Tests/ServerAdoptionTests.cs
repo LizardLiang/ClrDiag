@@ -49,7 +49,7 @@ public sealed class ServerAdoptionTests
         using var server = new ServerService(new DiagConfig(), log, FreePort());
 
         Assert.Null(server.FindExistingServer());
-        Assert.True(Contains(log, "沒有行程監聽"));
+        Assert.True(Contains(log, "查不到監聽的行程"));
     }
 
     [Fact]

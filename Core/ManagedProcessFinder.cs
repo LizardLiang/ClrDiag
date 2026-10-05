@@ -6,7 +6,7 @@ public sealed record ManagedProcessInfo(int Pid, string Name, long WorkingSet64,
 
 /// <summary>
 /// 找出可監看的受控行程。不綁定特定主機（IIS Express、w3wp、自架 dotnet 皆可）：
-/// 設定檔給了 processNames 就依名稱找，否則掃描所有載入 CLR 的行程。
+/// 設定檔給了 processNames 就依名稱找，否則掃描所有載入 CLR 的行程（儀表板接管行程不走這裡，見 ServerService.FindExistingServer）。
 /// </summary>
 public static class ManagedProcessFinder
 {
