@@ -31,9 +31,10 @@ public readonly record struct ProbeResult(
 /// 哪個行程是伺服器，啟動與接管都由 ServerLocator 辨識（監聽設定連接埠的受控行程）；
 /// 停止只依 PID（連同子行程樹）進行，絕不依映像名稱，避免停到同名的無關行程。
 ///
-/// 狀態欄位（serveProcess、state、serverPid、serverStart）的寫入都在 stateLock 內：
-/// serveProcess 由啟動流程寫入，只有「啟動它的那一次呼叫」失敗時、CleanupStartedProcess 與 StopAsync 會結束並清除；
-/// state、serverPid、serverStart 由 SetTarget、RestoreAfterFailedStart、StopAsync、Refresh 寫入。
+/// 狀態欄位：state、serverPid、serverStart 的寫入都在 stateLock 內（SetTarget、RestoreAfterFailedStart、
+/// StopAsync、Refresh）。serveProcess 由啟動流程在 stateLock 內寫入；清除則用 Interlocked 交換，
+/// 讓同一個行程只被結束與釋放一次：啟動它的那一次呼叫失敗時（FinishStart）、CleanupStartedProcess、
+/// StopAsync 成功後（StopAsync 以 PID 結束行程，之後才釋放物件）。TryBeginStart 也會釋放已結束的舊行程。
 /// </summary>
 public sealed class ServerService : IDisposable
 {
@@ -128,6 +129,18 @@ public sealed class ServerService : IDisposable
         }
     }
 
+    /// <summary>本工具啟動的行程（serveCommand 的行程）是否還被持有；為 true 時 StopAsync 才停得掉它，再啟動前要先停止。</summary>
+    public bool HasStartedProcess
+    {
+        get
+        {
+            lock (stateLock)
+            {
+                return serveProcess is not null;
+            }
+        }
+    }
+
     /// <summary>最近一次辨識、啟動或停止失敗的原因類別；成功時為 None。</summary>
     public ServerFailure LastFailure { get; private set; }
 
@@ -213,6 +226,7 @@ public sealed class ServerService : IDisposable
 
     private bool TryAdopt(int pid, ServerState adoptedState)
     {
+        bool stopping;
         lock (stateLock)
         {
             if (state is not (ServerState.Starting or ServerState.Stopping))
@@ -220,9 +234,16 @@ public sealed class ServerService : IDisposable
                 SetTarget(pid, adoptedState);
                 return true;
             }
+
+            stopping = state == ServerState.Stopping;
         }
 
-        log.Add("serve", LogKind.Warning, $"伺服器正在啟動或停止中，未接管 PID {pid}");
+        // 啟動中收到的除錯目標事件是正常情形：啟動流程成功後自己會設定目標，不必記警告
+        if (stopping)
+        {
+            log.Add("serve", LogKind.Warning, $"伺服器正在停止中，未接管 PID {pid}");
+        }
+
         return false;
     }
 

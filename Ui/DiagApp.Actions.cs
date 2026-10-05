@@ -190,7 +190,7 @@ public sealed partial class DiagApp
                 server.CleanupStartedProcess(); // 結束本工具啟動的行程；沒有啟動過行程時略過
                 monitor.Attach(null);
             }
-            else if (server.ServerPid is not null)
+            else if (server.ServerPid is not null || server.HasStartedProcess)
             {
                 status = "停止伺服器…";
                 bool stopped = await server.StopAsync(cts.Token).ConfigureAwait(false);
