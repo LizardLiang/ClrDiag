@@ -261,6 +261,7 @@ public static partial class ServerLocator
         var matching = new List<int>();
         var unknown = new List<int>();
         var skipped32 = new List<string>();
+        var notManaged = new List<string>();
         foreach (string name in processNames)
         {
             foreach (int pid in probes.PidsByName(TrimExe(name)))
@@ -268,6 +269,13 @@ public static partial class ServerLocator
                 if (probes.IsWow64(pid))
                 {
                     skipped32.Add(Describe(pid, probes));
+                    continue;
+                }
+
+                // 接管既有行程要能立刻監看，CLR 還沒載入的站台行程（閒置的 w3wp、靜態站台）先不接管
+                if (probes.RuntimeOf(pid) is null)
+                {
+                    notManaged.Add(Describe(pid, probes));
                     continue;
                 }
 
@@ -312,6 +320,14 @@ public static partial class ServerLocator
         if (skipped32.Count > 0)
         {
             return Fail(LogKind.Warning, Wow64Reason(string.Join("、", skipped32)));
+        }
+
+        if (notManaged.Count > 0)
+        {
+            return Fail(
+                LogKind.Info,
+                $"連接埠 {port} 由 HTTP.sys 監聽，名稱符合的 {string.Join("、", notManaged)} 還沒載入 CLR（站台尚未被請求），未接管；請求一次站台後再試，或用 p 鍵 / --pid 指定"
+            );
         }
 
         return Fail(

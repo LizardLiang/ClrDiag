@@ -462,8 +462,8 @@ public sealed class ServerService : IDisposable
     }
 
     /// <summary>
-    /// 輪詢 wrapper 的直接子行程（見 StartUnderDebuggerAsync／ChildProcessFinder 為什麼不能用
-    /// SnapshotCandidatePids 那套機制的說明）。實測 `dotnet run` 會先開一個 conhost.exe
+    /// 輪詢 wrapper 的直接子行程（見 StartUnderDebuggerAsync／ChildProcessFinder 為什麼不能掃描
+    /// 全部行程的模組找 CLR 的說明）。實測 `dotnet run` 會先開一個 conhost.exe
     /// （終端機主控台的輔助行程，即使 CreateNoWindow/重新導向三個串流也還是會出現），
     /// 幾秒後才輪到真正的 app 子行程——如果不排除 conhost，會在 app 還沒起來前就誤判
     /// conhost 是目標並嘗試附加，白白浪費一次啟動機會（attach 到非受控行程，
@@ -563,7 +563,9 @@ public sealed class ServerService : IDisposable
             log.Add(
                 "serve",
                 LogKind.Warning,
-                $"PID {string.Join("、", alive)} 未回應關閉訊號，改為強制結束（IIS Express 可能留下 URL 註冊）"
+                signalSent
+                    ? $"PID {string.Join("、", alive)} 未回應關閉訊號，改為強制結束（IIS Express 可能留下 URL 註冊）"
+                    : $"PID {string.Join("、", alive)} 沒有視窗可送關閉訊號，改為強制結束"
             );
             foreach (int target in alive)
             {

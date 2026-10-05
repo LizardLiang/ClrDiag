@@ -277,7 +277,9 @@ public sealed class ServerAdoptionTests
     {
         var system = new FakeSystem { Listeners = new[] { 4 } };
         system.Names[10] = "iisexpress";
+        system.Managed.Add(10);
         system.Names[11] = "iisexpress";
+        system.Managed.Add(11);
         system.CommandLines[10] = "\"C:\\IIS Express\\iisexpress.exe\" /path:C:\\a /port:5001";
         system.CommandLines[11] = "\"C:\\IIS Express\\iisexpress.exe\" /path:C:\\b /port:5002";
         (ServerService server, _) = Service(system, new[] { "iisexpress" }, port: 5002);
@@ -292,6 +294,7 @@ public sealed class ServerAdoptionTests
     {
         var system = new FakeSystem { Listeners = new[] { 4 } };
         system.Names[10] = "iisexpress";
+        system.Managed.Add(10);
         system.CommandLines[10] = "iisexpress.exe /path:C:\\a /port:5001";
         (ServerService server, LogBuffer log) = Service(system, new[] { "iisexpress" }, port: 5002);
         using (server)
@@ -306,7 +309,9 @@ public sealed class ServerAdoptionTests
     {
         var system = new FakeSystem { Listeners = new[] { 4 } };
         system.Names[10] = "w3wp";
+        system.Managed.Add(10);
         system.Names[11] = "w3wp";
+        system.Managed.Add(11);
         system.CommandLines[10] = "w3wp.exe -ap \"A\"";
         system.CommandLines[11] = "w3wp.exe -ap \"B\"";
         (ServerService server, LogBuffer log) = Service(system, new[] { "w3wp" });
@@ -322,7 +327,9 @@ public sealed class ServerAdoptionTests
     {
         var system = new FakeSystem { Listeners = new[] { 4 } };
         system.Names[10] = "iisexpress";
+        system.Managed.Add(10);
         system.Names[11] = "iisexpress";
+        system.Managed.Add(11);
         system.CommandLines[10] = "iisexpress.exe /port:5000";
         system.CommandLines[11] = "iisexpress.exe /port:5000";
         (ServerService server, _) = Service(system, new[] { "iisexpress" });
@@ -337,6 +344,7 @@ public sealed class ServerAdoptionTests
     {
         var system = new FakeSystem { Listeners = new[] { 4 } };
         system.Names[10] = "w3wp";
+        system.Managed.Add(10);
         system.CommandLines[10] = "w3wp.exe -ap \"A\"";
         (ServerService server, _) = Service(system, new[] { "w3wp" });
         using (server)
@@ -350,6 +358,7 @@ public sealed class ServerAdoptionTests
     {
         var system = new FakeSystem { Listeners = new[] { 4 } };
         system.Names[10] = "iisexpress";
+        system.Managed.Add(10);
         system.Wow64.Add(10);
         system.CommandLines[10] = "iisexpress.exe /port:5000";
         (ServerService server, LogBuffer log) = Service(system, new[] { "iisexpress" });
@@ -411,5 +420,19 @@ public sealed class ServerAdoptionTests
         system.Managed.Add(101);
 
         Assert.Equal(101, ServerLocator.Locate(5000, Array.Empty<string>(), 100, system.Probes).Pid);
+    }
+
+    [Fact]
+    public void HTTP_sys站台名稱符合但還沒載入CLR時接管既有行程會先略過並說明()
+    {
+        var system = new FakeSystem { Listeners = new[] { 4 } };
+        system.Names[10] = "w3wp";
+        system.CommandLines[10] = "w3wp.exe -ap \"A\"";
+        (ServerService server, LogBuffer log) = Service(system, new[] { "w3wp" });
+        using (server)
+        {
+            Assert.Null(server.FindExistingServer());
+            Assert.True(Contains(log, "還沒載入 CLR"));
+        }
     }
 }

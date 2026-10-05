@@ -131,7 +131,7 @@ clrdiag 依下列順序決定要用哪個專案：
 
 舊式專案在 `Program Files` 與 `Program Files (x86)` 的 `IIS Express` 資料夾都找不到 `iisexpress.exe` 時不推斷，原因寫在 `6 記錄`。clrdiag 不讀 `Web.config` 與連線字串。推斷出的 IIS Express 指令不是 `dotnet run` wrapper，除錯啟動（netcoredbg 只支援 .NET Core）不適用舊式專案。
 
-因為推斷在載入設定時做一次，所有模式看到同一份結果：舊式 ASP.NET 專案沒有 `clrdiag.json` 時，`processNames` 變成 `iisexpress`，連接埠為推斷值（例如 GSS.HAS.Web 是 58649）。`6 記錄` 的推斷說明會列出實際指令（含 `/path:`）與有效連接埠。`clrdiag --init` 產生的範本不寫 `port` 與 `processNames`（寫了就會覆蓋推斷），要覆蓋再自己加。
+因為推斷在載入設定時做一次，所有模式看到同一份結果：舊式 ASP.NET 專案沒有 `clrdiag.json` 時，`processNames` 變成 `iisexpress`，連接埠為推斷值（例如 GSS.HAS.Web 是 58649）。`6 記錄` 的推斷說明會列出實際指令（含 `/path:`）與連接埠（用 `--port` 覆寫時會註明）。`clrdiag --init` 產生的範本不寫 `port` 與 `processNames`（寫了就會覆蓋推斷），要覆蓋再自己加。
 
 ### 辨識與停止伺服器行程
 
@@ -139,7 +139,7 @@ clrdiag 依下列順序決定要用哪個專案：
 
 - 只認監聽 `port` 的行程，而且必須是 64 位元受控行程；設定了 `processNames` 時名稱也要符合。
 - 啟動時，監聽者必須是啟動的行程本身或它的子行程。`dotnet run` 的 MSBuild、編譯伺服器等不監聽連接埠，不會被當成伺服器。
-- HTTP.sys 站台（IIS Express）啟動時，從啟動的行程樹挑符合 `processNames` 的行程；接管既有的 IIS Express 時以命令列的 `/port:` 比對。
+- HTTP.sys 站台（IIS Express）啟動時，從啟動的行程樹挑符合 `processNames` 的行程；接管既有的 IIS Express 時以命令列的 `/port:` 比對，且該行程必須已載入 CLR（站台被請求過）。
 - 連接埠沒人監聽、查詢失敗、有多個候選、擁有者不是受控行程或是 32 位元行程（例如只有 x86 的 IIS Express）時，一律不接管，原因寫在 `6 記錄`；可用 `p` 或 `--pid` 指定。
 - 啟動後最多等 30 秒讓伺服器開始監聽；逾時或失敗會結束啟動的行程樹，不留下殘留行程。
 

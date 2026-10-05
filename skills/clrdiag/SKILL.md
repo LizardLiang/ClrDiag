@@ -156,7 +156,7 @@ Every field is optional. JSON comments and trailing commas are accepted.
 | `serveArguments` | Server argument array. Supports placeholders. |
 | `port` | Default port. Default `5000`. `--port` overrides it. |
 | `probeUrl` | Health probe URL. Supports `{port}`. Default `http://localhost:{port}/`. |
-| `processNames` | Image names of the server process (no .exe). Empty means port-only identification: only the managed process that listens on `port` is adopted, with any name. `--list` and the picker still list every process that loaded the CLR for you to choose. A name adds a condition: the process name must be in the list (no more "largest working set"). HTTP.sys sites (IIS Express, w3wp) record their listener under system PID 4, so they need `processNames`. ClrDiag then matches the `/port:` argument in the command line. Old ASP.NET projects default to `["iisexpress"]`. `null` means empty. |
+| `processNames` | Image names of the server process (no .exe). Empty means port-only identification: only the managed process that listens on `port` is adopted, with any name. `--list` and the picker still list every process that loaded the CLR for you to choose. A name adds a condition: the process name must be in the list (no more "largest working set"). HTTP.sys sites (IIS Express, w3wp) record their listener under system PID 4, so they need `processNames`. ClrDiag then matches the `/port:` argument in the command line. An adopted process must already have loaded the CLR. Old ASP.NET projects default to `["iisexpress"]`. `null` means empty. |
 | `appNamespaces` | Namespace prefixes counted as "own code". Empty means approximate by "not a framework type". |
 | `reportDirectory` | CSV output directory. Default `.clrdiag-reports`. |
 | `dapEnabled` | Enable the debug features. Default `true`. `false` spawns nothing and opens no pipe. |
@@ -180,7 +180,7 @@ If `iisexpress.exe` is missing from `Program Files` and `Program Files (x86)`, C
 and logs the reason. ClrDiag never reads `Web.config` or connection strings. Because the inference
 runs once in config loading, batch commands see it too: an old ASP.NET project with no
 `clrdiag.json` gets `processNames` `["iisexpress"]` and the inferred port. Tab 6 shows the
-real command, including `/path:`, and the effective port. `clrdiag --init` writes no `port` and
+real command, including `/path:`, and the port (and a note when `--port` overrides it). `clrdiag --init` writes no `port` and
 no `processNames`, because written values override the inference.
 
 **Start, adopt, stop.** The `s` key starts the server and waits up to 30 seconds for a

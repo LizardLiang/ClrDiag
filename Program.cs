@@ -279,7 +279,14 @@ catch (Exception ex)
 int effectivePort = port ?? config.Port;
 
 // --port 要同時作用在儀表板與批次指令辨識伺服器行程時看的連接埠（ServerLocator 讀 config.Port）
-config = config with { Port = effectivePort };
+config = config with
+{
+    Port = effectivePort,
+    ServeInferenceNote =
+        config.ServeInferenceNote is { } inferredNote && effectivePort != config.Port
+            ? $"{inferredNote}；--port 覆寫後實際連接埠為 {effectivePort}"
+            : config.ServeInferenceNote,
+};
 
 if (initMode)
 {
