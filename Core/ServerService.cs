@@ -188,6 +188,7 @@ public sealed class ServerService : IDisposable
     /// <summary>啟動伺服器並回傳新行程的 PID。失敗原因見 LastFailure。</summary>
     public async Task<int?> StartAsync(int? port, CancellationToken token)
     {
+        ServerState previous;
         lock (stateLock)
         {
             if (state is ServerState.Starting or ServerState.Running or ServerState.Stopping)
@@ -196,6 +197,7 @@ public sealed class ServerService : IDisposable
                 return serverPid;
             }
 
+            previous = state;
             state = ServerState.Starting;
         }
 
@@ -316,8 +318,21 @@ public sealed class ServerService : IDisposable
             if (!succeeded)
             {
                 KillStartedTree();
-                State = ServerState.Stopped;
+                RestoreAfterFailedStart(previous);
             }
+        }
+    }
+
+    /// <summary>
+    /// 啟動失敗後還原狀態：原本已接管行程（External／Debug）時維持原狀，其他情形回到 Stopped。
+    /// </summary>
+    private void RestoreAfterFailedStart(ServerState previous)
+    {
+        lock (stateLock)
+        {
+            state = serverPid is not null && previous is ServerState.External or ServerState.Debug
+                ? previous
+                : ServerState.Stopped;
         }
     }
 
@@ -365,6 +380,7 @@ public sealed class ServerService : IDisposable
             return null;
         }
 
+        ServerState previous;
         lock (stateLock)
         {
             if (state is ServerState.Starting or ServerState.Stopping)
@@ -373,6 +389,7 @@ public sealed class ServerService : IDisposable
                 return null;
             }
 
+            previous = state;
             state = ServerState.Starting;
         }
 
@@ -465,7 +482,7 @@ public sealed class ServerService : IDisposable
             if (!succeeded)
             {
                 CleanupDebugWrapper();
-                State = ServerState.Stopped;
+                RestoreAfterFailedStart(previous);
             }
         }
     }

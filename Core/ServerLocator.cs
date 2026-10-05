@@ -277,6 +277,12 @@ public static partial class ServerLocator
                 continue;
             }
 
+            // 命令列寫了別的連接埠，這個行程服務的是別的站台
+            if (ParsePort(probes.CommandLine(pid)) is { } commandPort && commandPort != port)
+            {
+                continue;
+            }
+
             if (probes.IsWow64(pid))
             {
                 skipped32.Add(Describe(pid, probes));

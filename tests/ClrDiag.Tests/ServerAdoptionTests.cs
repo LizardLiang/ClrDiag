@@ -483,4 +483,16 @@ public sealed class ServerAdoptionTests
             Assert.Equal(ServerFailure.NotLoadedYet, server.LastFailure);
         }
     }
+
+    [Fact]
+    public void 啟動時HTTP_sys站台行程命令列指定別的連接埠就不採用()
+    {
+        var system = new FakeSystem { Listeners = new[] { 4 } };
+        system.Add(100, "iisexpress", "iisexpress.exe /port:5001", managed: false);
+
+        LocateResult result = ServerLocator.Locate(5002, new[] { "iisexpress" }, 100, system.Probes);
+
+        Assert.Null(result.Pid);
+        Assert.Equal(ServerFailure.NoServingProcess, result.Failure);
+    }
 }

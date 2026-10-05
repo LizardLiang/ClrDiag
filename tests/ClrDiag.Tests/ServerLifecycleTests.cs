@@ -8,7 +8,7 @@ namespace ClrDiag.Tests;
 /// <summary>
 /// 以真的行程驗證 ServerService 的啟動與停止：用 ClrDiag.TestServer（受控行程）當伺服器，
 /// 確認辨識的是監聽連接埠的行程、停止只動自己啟動的那一棵樹，不碰名稱相同的其他行程。
-/// 各測試用自己的連接埠與行程，互不干擾；每個測試都在 finally 停止自己啟動的行程。
+/// 各測試用自己的連接埠與行程，互不干擾；成功啟動伺服器的測試在 finally 停止它，啟動失敗的測試由 StartAsync 自己清除啟動的行程。
 /// </summary>
 public sealed class ServerLifecycleTests
 {
@@ -412,6 +412,29 @@ public sealed class ServerLifecycleTests
         finally
         {
             KillQuietly(process);
+        }
+    }
+
+    [Fact]
+    public async Task 已接管行程時啟動失敗不改變接管狀態()
+    {
+        using Process target = StartBystander(out int targetPort);
+        try
+        {
+            var system = new FakeSystem { Listeners = new[] { 900, 901 } };
+            using ServerService server = Service(Config("idle"), new LogBuffer(), targetPort, probes: system.Probes);
+            server.AdoptExisting(target.Id);
+
+            int? pid = await server.StartAsync(null, CancellationToken.None);
+
+            Assert.Null(pid);
+            Assert.Equal(ServerFailure.MultipleListeners, server.LastFailure);
+            Assert.Equal(ServerState.External, server.State);
+            Assert.Equal(target.Id, server.ServerPid);
+        }
+        finally
+        {
+            KillQuietly(target);
         }
     }
 }
