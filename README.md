@@ -107,7 +107,7 @@ clrdiag 依下列順序決定要用哪個專案：
 | `buildCommand`    | 建置執行檔。省略時：SDK 專案用 `dotnet`，舊式專案用 vswhere 找到的 MSBuild |
 | `buildArguments`  | 建置參數，可用 `{project}` `{config}` `{root}` `{port}` 佔位符             |
 | `configurations`  | `c` 鍵可循環的建置設定                                                    |
-| `serveCommand`    | 啟動伺服器的執行檔。**省略時 `s`/`r` 鍵停用**，只能附加到既有行程          |
+| `serveCommand`    | 啟動伺服器的執行檔。省略時依專案類型推斷（見下方「省略 serveCommand 時的推斷」）；無法推斷時 **`s`/`r` 鍵停用**，只能附加到既有行程 |
 | `serveArguments`  | 啟動參數，同樣支援佔位符                                                  |
 | `port`            | 預設連接埠（`--port` 可覆寫）                                             |
 | `probeUrl`        | 健康探測網址，支援 `{port}`                                               |
@@ -118,6 +118,20 @@ clrdiag 依下列順序決定要用哪個專案：
 | `dapAdapterPath`  | netcoredbg 執行檔路徑。省略時：`PATH` → mason 預設安裝路徑                |
 | `dapBreakpoints`  | 啟動時載入的中斷點清單，格式 `"路徑:行號"`（見下方「除錯」一節）          |
 | `dapWatches`      | 啟動時載入的監看運算式清單                                                |
+
+### 省略 serveCommand 時的推斷
+
+設定檔沒有 `serveCommand` 時，clrdiag 依選定的專案檔推斷啟動方式，並在 `6 記錄` 寫一行說明推斷了什麼、來源是哪個檔案。設定檔明確寫的 `serveCommand`、`serveArguments`、`port`、`processNames` 一律優先，推斷只補沒寫的欄位；已寫 `serveCommand` 時完全不推斷。
+
+| 專案類型 | 推斷的啟動方式 | 連接埠來源 |
+| -------- | -------------- | ---------- |
+| `Sdk="Microsoft.NET.Sdk.Web"`（屬性或 `<Sdk Name=…/>`） | `dotnet run --project {project} --urls http://localhost:{port}`（除錯時與手寫的 `dotnet run` 一樣當作 wrapper 處理） | `Properties/launchSettings.json` 第一個 profile 的 `applicationUrl` 的 http 連接埠，沒有則 5000 |
+| 舊式 ASP.NET Web 應用程式（`ProjectTypeGuids` 含 `{349c5851-65df-11da-9384-00065b846f21}`） | `iisexpress.exe /path:<專案資料夾> /port:{port}`；`processNames` 預設 `["iisexpress"]` | `<專案檔>.user` 的 `DevelopmentServerPort` → 專案檔的 `DevelopmentServerPort` → `IISUrl` 的 http 連接埠（`.user` 優先）→ 5000 |
+| 其他（主控台、類別庫、`.sln`／`.slnx`） | 不推斷，只能附加到既有行程，原因寫在 `6 記錄` | 5000 |
+
+舊式專案在 `Program Files` 與 `Program Files (x86)` 的 `IIS Express` 資料夾都找不到 `iisexpress.exe` 時不推斷，原因寫在 `6 記錄`。clrdiag 不讀 `Web.config` 與連線字串。
+
+因為推斷在載入設定時做一次，所有模式看到同一份結果：舊式 ASP.NET 專案沒有 `clrdiag.json` 時，`processNames` 變成 `iisexpress`，不加 `--pid` 的批次指令因此優先挑 `iisexpress` 行程（沒有時仍退回挑工作集最大的受控行程）。要改監看別的行程，加 `--pid`，或在 `clrdiag.json` 寫 `processNames`。
 
 其他常見情境：
 

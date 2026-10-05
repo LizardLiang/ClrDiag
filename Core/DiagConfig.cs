@@ -136,6 +136,10 @@ public sealed record DiagConfig
             .Equals("dotnet", StringComparison.OrdinalIgnoreCase)
         && (ServeArguments?.FirstOrDefault()?.Equals("run", StringComparison.OrdinalIgnoreCase) ?? false);
 
+    /// <summary>serveCommand 的推斷結果說明（或無法推斷的原因）；設定檔已有 serveCommand 時為 null。啟動時寫進 6 記錄。</summary>
+    [JsonIgnore]
+    public string? ServeInferenceNote { get; init; }
+
     [JsonIgnore]
     public string? ResolvedBuildProject { get; private set; }
 
@@ -162,7 +166,8 @@ public sealed record DiagConfig
     public static DiagConfig Load(
         string? explicitConfig,
         string? explicitRoot,
-        string? explicitBuildProject = null
+        string? explicitBuildProject = null,
+        Func<string?>? iisExpressLocator = null
     )
     {
         string? projectFile = explicitBuildProject is null
@@ -173,10 +178,12 @@ public sealed record DiagConfig
 
         string? configFile = explicitConfig ?? FindConfigFile(searchStart);
         DiagConfig config;
+        bool portConfigured = false;
 
         if (configFile is not null)
         {
             string json = File.ReadAllText(configFile);
+            portConfigured = HasProperty(json, nameof(Port));
             config =
                 JsonSerializer.Deserialize<DiagConfig>(json, JsonOptions)
                 ?? throw new InvalidOperationException($"設定檔內容無法解析: {configFile}");
@@ -200,7 +207,25 @@ public sealed record DiagConfig
         }
 
         config.ResolveBuildTarget();
-        return config;
+
+        // 唯一的推斷點：之後儀表板與批次模式讀到的 ServeCommand、Port、ProcessNames 都是這份結果。
+        ServeInference.Result inference = ServeInference.Apply(
+            config,
+            portConfigured,
+            iisExpressLocator ?? ServeInference.LocateIisExpress
+        );
+        return inference.Config with { ServeInferenceNote = inference.Note };
+    }
+
+    /// <summary>設定檔的 JSON 是否明確寫了某個屬性（不分大小寫），用來分辨「沒寫」與「寫了預設值」。</summary>
+    private static bool HasProperty(string json, string name)
+    {
+        using JsonDocument document = JsonDocument.Parse(
+            json,
+            new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true }
+        );
+        return document.RootElement.ValueKind == JsonValueKind.Object
+            && document.RootElement.EnumerateObject().Any(p => p.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new()

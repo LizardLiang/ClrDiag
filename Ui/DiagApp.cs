@@ -231,6 +231,11 @@ public sealed partial class DiagApp : IDisposable
                 : "未設定啟動指令，只能附加到既有行程"
         );
 
+        if (config.ServeInferenceNote is { } inferenceNote)
+        {
+            log.Add("diag", LogKind.Info, inferenceNote);
+        }
+
         log.Add(
             "diag",
             LogKind.Info,

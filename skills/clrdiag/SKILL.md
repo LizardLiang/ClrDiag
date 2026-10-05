@@ -151,7 +151,7 @@ Every field is optional. JSON comments and trailing commas are accepted.
 | `buildCommand` | Build executable. Default: `dotnet` for SDK projects, MSBuild from vswhere for legacy projects. |
 | `buildArguments` | Build argument array. Supports placeholders. |
 | `configurations` | Configurations the `c` key cycles. Default `["Debug", "Release"]`. |
-| `serveCommand` | Dev server executable. **Omit it and the `s` and `r` keys stop working.** |
+| `serveCommand` | Dev server executable. When omitted, ClrDiag infers it from the selected project (see "Inferred serve command"). When it cannot infer one, **the `s` and `r` keys stop working.** |
 | `serveArguments` | Server argument array. Supports placeholders. |
 | `port` | Default port. Default `5000`. `--port` overrides it. |
 | `probeUrl` | Health probe URL. Supports `{port}`. Default `http://localhost:{port}/`. |
@@ -162,6 +162,24 @@ Every field is optional. JSON comments and trailing commas are accepted.
 | `dapAdapterPath` | Path to the netcoredbg executable. |
 | `dapBreakpoints` | Startup breakpoint list. Format `"path:line"`. Bad entries are skipped in silence. |
 | `dapWatches` | Startup watch expression list. |
+
+### Inferred serve command
+
+With no `serveCommand` in the config, ClrDiag infers one from the project file and
+writes one line in tab 6 that says what it inferred and from which file. Values written in
+`clrdiag.json` always win. Inference fills only the missing fields.
+
+| Project | Inferred start | Port source |
+|---|---|---|
+| `Sdk="Microsoft.NET.Sdk.Web"` | `dotnet run --project {project} --urls http://localhost:{port}` (a wrapper, same as a configured `dotnet run`) | First profile `applicationUrl` http port in `Properties/launchSettings.json`, else `5000` |
+| Old ASP.NET Web App (`ProjectTypeGuids` has `{349c5851-65df-11da-9384-00065b846f21}`) | `iisexpress.exe /path:<project folder> /port:{port}`, `processNames` defaults to `["iisexpress"]` | `DevelopmentServerPort` in `<project>.user`, then the project file, then the http `IISUrl`, else `5000` |
+| Console app, class library, `.sln` | None. Attach-only. The reason is logged in tab 6. | `5000` |
+
+If `iisexpress.exe` is missing from `Program Files` and `Program Files (x86)`, ClrDiag infers nothing
+and logs the reason. ClrDiag never reads `Web.config` or connection strings. Because the inference
+runs once in config loading, batch commands see it too: an old ASP.NET project with no
+`clrdiag.json` gets `processNames` `["iisexpress"]`, so batch commands without `--pid` prefer
+the `iisexpress` process. Pass `--pid` to choose another one.
 
 Placeholders `{project}`, `{config}`, `{root}`, and `{port}` expand inside
 `buildArguments` and `serveArguments`. `{port}` also expands inside `probeUrl`.
