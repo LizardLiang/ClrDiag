@@ -16,29 +16,10 @@ public sealed class ServerAdoptionTests
         return port;
     }
 
-    private static bool Contains(LogBuffer log, string text) =>
-        log.TakeLast(log.Count).Any(l => l.Text.Contains(text, StringComparison.Ordinal));
-
-    /// <summary>假的系統狀態：listeners 是連接埠的監聽者，其餘為各 PID 的屬性。</summary>
-    private sealed class FakeSystem
+    private static int? SingleListener(int port)
     {
-        public IReadOnlyList<int>? Listeners { get; set; } = Array.Empty<int>();
-        public Dictionary<int, string> Names { get; } = new();
-        public HashSet<int> Managed { get; } = new();
-        public HashSet<int> Wow64 { get; } = new();
-        public Dictionary<int, string> CommandLines { get; } = new();
-        public Dictionary<int, HashSet<int>> Descendants { get; } = new();
-
-        public LocatorProbes Probes =>
-            new(
-                _ => Listeners,
-                pid => Managed.Contains(pid) ? ".NET Framework" : null,
-                pid => Names.GetValueOrDefault(pid),
-                pid => Wow64.Contains(pid),
-                pid => Descendants.GetValueOrDefault(pid) ?? new HashSet<int>(),
-                name => Names.Where(p => p.Value.Equals(name, StringComparison.OrdinalIgnoreCase)).Select(p => p.Key).ToList(),
-                pid => CommandLines.GetValueOrDefault(pid)
-            );
+        IReadOnlyList<int>? pids = PortOwnerFinder.FindListenerPids(port);
+        return pids is { Count: 1 } ? pids[0] : null;
     }
 
     private static (ServerService Server, LogBuffer Log) Service(FakeSystem system, string[]? names = null, int port = 5000)
@@ -57,7 +38,7 @@ public sealed class ServerAdoptionTests
         {
             int port = ((IPEndPoint)listener.LocalEndpoint).Port;
 
-            Assert.Equal(Environment.ProcessId, PortOwnerFinder.FindListenerPid(port));
+            Assert.Equal(Environment.ProcessId, SingleListener(port));
             Assert.True(PortOwnerFinder.IsListening(port));
         }
         finally
@@ -85,7 +66,7 @@ public sealed class ServerAdoptionTests
         {
             int port = ((IPEndPoint)listener.LocalEndpoint).Port;
 
-            Assert.Equal(Environment.ProcessId, PortOwnerFinder.FindListenerPid(port));
+            Assert.Equal(Environment.ProcessId, SingleListener(port));
         }
         finally
         {
@@ -129,7 +110,7 @@ public sealed class ServerAdoptionTests
     {
         int port = FreePort();
 
-        Assert.Null(PortOwnerFinder.FindListenerPid(port));
+        Assert.Null(SingleListener(port));
         Assert.Empty(PortOwnerFinder.FindListenerPids(port)!);
         Assert.False(PortOwnerFinder.IsListening(port));
     }
@@ -141,7 +122,7 @@ public sealed class ServerAdoptionTests
         using var server = new ServerService(new DiagConfig(), log, FreePort());
 
         Assert.Null(server.FindExistingServer());
-        Assert.True(Contains(log, "沒有人監聽"));
+        Assert.Equal(ServerFailure.NotListening, server.LastFailure);
     }
 
     [Fact]
@@ -195,7 +176,7 @@ public sealed class ServerAdoptionTests
             using var server = new ServerService(config, log, port);
 
             Assert.Null(server.FindExistingServer());
-            Assert.True(Contains(log, "不在 processNames"));
+            Assert.Equal(ServerFailure.NameMismatch, server.LastFailure);
         }
         finally
         {
@@ -220,7 +201,7 @@ public sealed class ServerAdoptionTests
         using (server)
         {
             Assert.Null(server.FindExistingServer());
-            Assert.True(Contains(log, "HTTP.sys"));
+            Assert.Equal(ServerFailure.HttpSysNeedsProcessNames, server.LastFailure);
         }
     }
 
@@ -233,7 +214,7 @@ public sealed class ServerAdoptionTests
         using (server)
         {
             Assert.Null(server.FindExistingServer());
-            Assert.True(Contains(log, "無法確認它是可監看的 64 位元受控行程"));
+            Assert.Equal(ServerFailure.NotManaged, server.LastFailure);
         }
     }
 
@@ -247,7 +228,7 @@ public sealed class ServerAdoptionTests
         using (server)
         {
             Assert.Null(server.FindExistingServer());
-            Assert.True(Contains(log, "32 位元"));
+            Assert.Equal(ServerFailure.Wow64, server.LastFailure);
         }
     }
 
@@ -259,7 +240,7 @@ public sealed class ServerAdoptionTests
         using (failedServer)
         {
             Assert.Null(failedServer.FindExistingServer());
-            Assert.True(Contains(failedLog, "查詢連接埠"));
+            Assert.Equal(ServerFailure.QueryFailed, failedServer.LastFailure);
         }
 
         var split = new FakeSystem { Listeners = new[] { 900, 901 } };
@@ -268,7 +249,7 @@ public sealed class ServerAdoptionTests
         using (splitServer)
         {
             Assert.Null(splitServer.FindExistingServer());
-            Assert.True(Contains(splitLog, "多個行程監聽"));
+            Assert.Equal(ServerFailure.MultipleListeners, splitServer.LastFailure);
         }
     }
 
@@ -300,7 +281,7 @@ public sealed class ServerAdoptionTests
         using (server)
         {
             Assert.Null(server.FindExistingServer());
-            Assert.True(Contains(log, "找不到名稱為 iisexpress"));
+            Assert.Equal(ServerFailure.NoServingProcess, server.LastFailure);
         }
     }
 
@@ -318,7 +299,7 @@ public sealed class ServerAdoptionTests
         using (server)
         {
             Assert.Null(server.FindExistingServer());
-            Assert.True(Contains(log, "無法判斷"));
+            Assert.Equal(ServerFailure.MultipleCandidates, server.LastFailure);
         }
     }
 
@@ -365,7 +346,7 @@ public sealed class ServerAdoptionTests
         using (server)
         {
             Assert.Null(server.FindExistingServer());
-            Assert.True(Contains(log, "32 位元"));
+            Assert.Equal(ServerFailure.Wow64, server.LastFailure);
         }
     }
 
@@ -380,7 +361,7 @@ public sealed class ServerAdoptionTests
         LocateResult result = ServerLocator.Locate(5000, Array.Empty<string>(), startedRootPid: 100, system.Probes);
 
         Assert.Null(result.Pid);
-        Assert.Contains("不是本工具啟動的行程", result.Reason);
+        Assert.Equal(ServerFailure.NotInStartedTree, result.Failure);
     }
 
     [Fact]
@@ -408,18 +389,85 @@ public sealed class ServerAdoptionTests
     }
 
     [Fact]
-    public void 啟動時HTTP_sys站台沒設定行程名稱則要求樹內有受控行程()
+    public void 啟動時HTTP_sys站台沒設定行程名稱立即失敗而不是接管行程樹內的行程()
     {
         var system = new FakeSystem { Listeners = new[] { 4 } };
-        system.Names[100] = "pwsh";
-        system.Names[101] = "iisexpress";
+        system.Add(100, "powershell", null);
+        system.Add(101, "iisexpress", null);
         system.Descendants[100] = new HashSet<int> { 101 };
 
-        Assert.Null(ServerLocator.Locate(5000, Array.Empty<string>(), 100, system.Probes).Pid);
+        LocateResult result = ServerLocator.Locate(5000, Array.Empty<string>(), 100, system.Probes);
 
-        system.Managed.Add(101);
+        Assert.Null(result.Pid);
+        Assert.Equal(ServerFailure.HttpSysNeedsProcessNames, result.Failure);
+        Assert.True(ServerLocator.IsFatal(result.Failure));
+    }
 
-        Assert.Equal(101, ServerLocator.Locate(5000, Array.Empty<string>(), 100, system.Probes).Pid);
+    [Fact]
+    public void 啟動時HTTP_sys站台只看名稱不要求已載入CLR()
+    {
+        var system = new FakeSystem { Listeners = new[] { 4 } };
+        system.Add(100, "powershell", null, managed: true);
+        system.Add(101, "iisexpress", null, managed: false);
+        system.Descendants[100] = new HashSet<int> { 101 };
+
+        LocateResult result = ServerLocator.Locate(5000, new[] { "iisexpress" }, 100, system.Probes);
+
+        Assert.Equal(101, result.Pid);
+    }
+
+    [Fact]
+    public void 真正的站台是32位元行程時不會接管另一個沒有連接埠的IISExpress()
+    {
+        var system = new FakeSystem { Listeners = new[] { 4 } };
+        system.Add(10, "iisexpress", "iisexpress.exe /path:C:\\a /port:58649", wow64: true);
+        system.Add(11, "iisexpress", "iisexpress.exe /config:C:\\x\\applicationhost.config");
+        (ServerService server, _) = Service(system, new[] { "iisexpress" }, port: 58649);
+        using (server)
+        {
+            Assert.Null(server.FindExistingServer());
+            Assert.Equal(ServerFailure.Wow64, server.LastFailure);
+        }
+    }
+
+    [Fact]
+    public void 真正的站台還沒載入CLR時不會接管另一個沒有連接埠的IISExpress()
+    {
+        var system = new FakeSystem { Listeners = new[] { 4 } };
+        system.Add(10, "iisexpress", "iisexpress.exe /path:C:\\a /port:58649", managed: false);
+        system.Add(11, "iisexpress", "iisexpress.exe /config:C:\\x\\applicationhost.config");
+        (ServerService server, _) = Service(system, new[] { "iisexpress" }, port: 58649);
+        using (server)
+        {
+            Assert.Null(server.FindExistingServer());
+            Assert.Equal(ServerFailure.NotLoadedYet, server.LastFailure);
+        }
+    }
+
+    [Fact]
+    public void 讀不到命令列的行程不列入備援()
+    {
+        var system = new FakeSystem { Listeners = new[] { 4 } };
+        system.Add(10, "w3wp", null);
+        (ServerService server, _) = Service(system, new[] { "w3wp" });
+        using (server)
+        {
+            Assert.Null(server.FindExistingServer());
+            Assert.Equal(ServerFailure.NoServingProcess, server.LastFailure);
+        }
+    }
+
+    [Fact]
+    public void 命令列指定別的連接埠的行程被排除而沒有連接埠的備援行程被接管()
+    {
+        var system = new FakeSystem { Listeners = new[] { 4 } };
+        system.Add(10, "iisexpress", "iisexpress.exe /port:5001");
+        system.Add(11, "iisexpress", "iisexpress.exe /config:C:\\x\\applicationhost.config");
+        (ServerService server, _) = Service(system, new[] { "iisexpress" }, port: 5002);
+        using (server)
+        {
+            Assert.Equal(11, server.FindExistingServer());
+        }
     }
 
     [Fact]
@@ -432,7 +480,7 @@ public sealed class ServerAdoptionTests
         using (server)
         {
             Assert.Null(server.FindExistingServer());
-            Assert.True(Contains(log, "還沒載入 CLR"));
+            Assert.Equal(ServerFailure.NotLoadedYet, server.LastFailure);
         }
     }
 }

@@ -53,16 +53,6 @@ public static class PortOwnerFinder
         return (v4 ?? new List<int>()).Concat(v6 ?? new List<int>()).Distinct().ToList();
     }
 
-    /// <summary>
-    /// 回傳監聽該連接埠的行程 PID；沒有人監聽、查詢失敗，或 IPv4 / IPv6 由不同行程監聽（無法判斷
-    /// 哪一個才是目標）都回傳 null。
-    /// </summary>
-    public static int? FindListenerPid(int port)
-    {
-        IReadOnlyList<int>? pids = FindListenerPids(port);
-        return pids is { Count: 1 } ? pids[0] : null;
-    }
-
     /// <summary>是否有人在該連接埠監聽；查表失敗時退回 IPGlobalProperties 的結果。</summary>
     public static bool IsListening(int port)
     {

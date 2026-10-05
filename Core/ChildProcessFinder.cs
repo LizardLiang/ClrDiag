@@ -57,8 +57,11 @@ public static class ChildProcessFinder
         ReadParentMap().Where(pair => pair.Value == parentPid).Select(pair => pair.Key).ToList();
 
     /// <summary>
-    /// 回傳 rootPid 底下所有後代行程的 PID（不含 rootPid 本身）。同一份快照一次走完整棵樹；
-    /// Windows 的 PPID 在父行程結束後不會更新，所以已結束的中間行程底下的孫行程仍會被找到。
+    /// 回傳 rootPid 底下所有後代行程的 PID（不含 rootPid 本身）。同一份快照一次走完整棵樹，
+    /// 沿著「父 PID」連結往下找。Windows 的父 PID 在父行程結束後不會更新，所以 rootPid 本身
+    /// 已結束時，記著它 PID 的直接子行程仍找得到；但中間行程已結束時，它底下的孫行程接不到
+    /// rootPid（快照裡沒有那個中間行程），找不到。PID 被重複使用時結果可能含無關行程，
+    /// 呼叫端結束行程前要自行核對建立時間。
     /// </summary>
     public static HashSet<int> DescendantsOf(int rootPid)
     {

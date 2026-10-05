@@ -55,7 +55,7 @@ process instead. The list is only for picking a PID yourself.
 **Target selection.** Every batch command accepts `--pid N`. Without `--pid`, the
 dashboard, the `s` key, and batch commands use one rule. They pick only the 64-bit managed
 process that listens on the configured port. When `processNames` is set, the process
-name must also match. Nothing is picked when no process listens, when several candidates
+name must also match. HTTP.sys sites (IIS Express, w3wp) need `processNames`; ClrDiag then compares the `/port:` argument of the matching processes. Nothing is picked when no process listens, when several candidates
 exist, when the owner is not managed, or when it is 32-bit. The reason is logged in tab 6
 (batch commands print it). Pass `--pid` to choose a process yourself. Ambiguity produces a correct report about the wrong process.
 
@@ -156,7 +156,7 @@ Every field is optional. JSON comments and trailing commas are accepted.
 | `serveArguments` | Server argument array. Supports placeholders. |
 | `port` | Default port. Default `5000`. `--port` overrides it. |
 | `probeUrl` | Health probe URL. Supports `{port}`. Default `http://localhost:{port}/`. |
-| `processNames` | Image names of the server process (no .exe). Empty means port-only identification: only the managed process that listens on `port` is adopted, with any name. `--list` and the picker still list every process that loaded the CLR for you to choose. A name adds a condition: the process name must be in the list (no more "largest working set"). HTTP.sys sites (IIS Express, w3wp) record their listener under system PID 4, so they need `processNames`. ClrDiag then matches the `/port:` argument in the command line. An adopted process must already have loaded the CLR. Old ASP.NET projects default to `["iisexpress"]`. `null` means empty. |
+| `processNames` | Image names of the server process (no .exe). Empty means port-only identification: only the managed process that listens on `port` is adopted, with any name. `--list` and the picker still list every process that loaded the CLR for you to choose. A name adds a condition: the process name must be in the list. HTTP.sys sites (IIS Express, w3wp) record their listener under system PID 4, so they always need `processNames` (without it, start and adopt fail at once with a tab 6 message). When adopting, ClrDiag reads the `/port:` argument of every process with a matching name: a different `/port:` excludes the process, and a `/port:` equal to `port` is the evidence (if that process is 32-bit or has not loaded the CLR yet, ClrDiag reports that and adopts nothing else). With no such evidence, exactly one process that has no `/port:`, is 64-bit and has loaded the CLR is adopted as a fallback (several means none). A w3wp has no `/port:` and can serve other sites, so the fallback cannot tell them apart. A process whose command line cannot be read is not a fallback candidate. On start, the process is chosen by name from the started tree, so it needs no loaded CLR. Old ASP.NET projects default to `["iisexpress"]`. `null` means empty. |
 | `appNamespaces` | Namespace prefixes counted as "own code". Empty means approximate by "not a framework type". |
 | `reportDirectory` | CSV output directory. Default `.clrdiag-reports`. |
 | `dapEnabled` | Enable the debug features. Default `true`. `false` spawns nothing and opens no pipe. |
@@ -411,7 +411,7 @@ holds a debug session on the same process.
 | --- | --- | --- | --- |
 | `--list` | none | Table of PID, name, runtime, working set. Max 30 rows. | Always first. Liveness check and PID discovery. |
 | `--pid` | `N` | none | Any command, to pin the target process. |
-| `--port` | `N` | none | Override the config port for the probe and placeholders. |
+| `--port` | `N` | none | Override the config port for the probe, the placeholders, and the port used to identify the server process. |
 | `--root` | `path` | none | Set the project root for config search and pipe name. |
 | `--config` | `path` | none | Point at an explicit clrdiag.json. |
 | `--project` | `name` | Exit 2 with candidates on a blank value or no unique match. | Any command, when the directory holds more than one project. |

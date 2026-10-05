@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
-using System.Text.RegularExpressions;
 using ClrDiag.Core;
 
 namespace ClrDiag.Tests;
@@ -9,12 +8,13 @@ namespace ClrDiag.Tests;
 /// <summary>
 /// 以真的行程驗證 ServerService 的啟動與停止：用 ClrDiag.TestServer（受控行程）當伺服器，
 /// 確認辨識的是監聽連接埠的行程、停止只動自己啟動的那一棵樹，不碰名稱相同的其他行程。
-/// 各測試用自己的連接埠與行程，互不干擾。
+/// 各測試用自己的連接埠與行程，互不干擾；每個測試都在 finally 停止自己啟動的行程。
 /// </summary>
 public sealed class ServerLifecycleTests
 {
     private static readonly string TestServerDll = Path.Combine(AppContext.BaseDirectory, "ClrDiag.TestServer.dll");
 
+    /// <summary>挑一個目前沒人監聽的連接埠；釋放到使用之間可能被搶走，使用端要能重試。</summary>
     private static int FreePort()
     {
         var probe = new TcpListener(IPAddress.Loopback, 0);
@@ -31,17 +31,13 @@ public sealed class ServerLifecycleTests
             ServeArguments = new[] { TestServerDll, mode }.Concat(extra).ToArray(),
         };
 
-    private static ServerService Service(DiagConfig config, LogBuffer log, int port, int timeoutSeconds = 30) =>
-        new(config, log, port) { StartTimeout = TimeSpan.FromSeconds(timeoutSeconds) };
-
-    private static bool Contains(LogBuffer log, string text) =>
-        log.TakeLast(log.Count).Any(l => l.Text.Contains(text, StringComparison.Ordinal));
-
-    private static int StartedPid(LogBuffer log)
-    {
-        string line = log.TakeLast(log.Count).First(l => l.Text.Contains("啟動中", StringComparison.Ordinal)).Text;
-        return int.Parse(Regex.Match(line, @"PID (\d+)").Groups[1].Value);
-    }
+    private static ServerService Service(
+        DiagConfig config,
+        LogBuffer log,
+        int port,
+        int timeoutSeconds = 30,
+        LocatorProbes? probes = null
+    ) => new(config, log, port, probes) { StartTimeout = TimeSpan.FromSeconds(timeoutSeconds) };
 
     private static bool Alive(int pid)
     {
@@ -56,131 +52,230 @@ public sealed class ServerLifecycleTests
         }
     }
 
-    /// <summary>啟動一個與被測行程同映像名稱（dotnet）、監聽別的連接埠的旁觀行程。</summary>
-    private static Process StartBystander(out int port)
+    private static async Task WaitGoneAsync(int pid)
     {
-        port = FreePort();
-        var psi = new ProcessStartInfo("dotnet") { UseShellExecute = false, CreateNoWindow = true };
-        psi.ArgumentList.Add(TestServerDll);
-        psi.ArgumentList.Add("listen");
-        psi.ArgumentList.Add(port.ToString());
-        Process process = Process.Start(psi)!;
-        for (int i = 0; i < 100 && !PortOwnerFinder.IsListening(port); i++)
+        for (int i = 0; i < 50 && Alive(pid); i++)
         {
-            Thread.Sleep(100);
+            await Task.Delay(100);
+        }
+    }
+
+    /// <summary>
+    /// 在空閒連接埠啟動測試伺服器；連接埠剛好被別人搶走（TestServer 綁定失敗而結束）就換一個重試。
+    /// </summary>
+    private static async Task<(ServerService Server, LogBuffer Log, int Port, int? Pid)> StartOnFreePortAsync(string mode)
+    {
+        ServerService? server = null;
+        LogBuffer log = new();
+        int port = 0;
+        int? pid = null;
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            server?.Dispose();
+            log = new LogBuffer();
+            port = FreePort();
+            server = Service(Config(mode, "{port}"), log, port);
+            pid = await server.StartAsync(null, CancellationToken.None);
+            if (pid is not null || server.LastFailure != ServerFailure.StartCommandExited)
+            {
+                break;
+            }
         }
 
-        return process;
+        return (server!, log, port, pid);
+    }
+
+    /// <summary>啟動一個與被測行程同映像名稱（dotnet）、監聽別的連接埠的旁觀行程；確認它真的在監聽才回傳。</summary>
+    private static Process StartBystander(out int port)
+    {
+        for (int attempt = 0; attempt < 3; attempt++)
+        {
+            port = FreePort();
+            var psi = new ProcessStartInfo("dotnet") { UseShellExecute = false, CreateNoWindow = true };
+            psi.ArgumentList.Add(TestServerDll);
+            psi.ArgumentList.Add("listen");
+            psi.ArgumentList.Add(port.ToString());
+            Process process = Process.Start(psi)!;
+            for (int i = 0; i < 100 && !process.HasExited && !PortOwnerFinder.IsListening(port); i++)
+            {
+                Thread.Sleep(100);
+            }
+
+            if (!process.HasExited && PortOwnerFinder.IsListening(port))
+            {
+                return process;
+            }
+
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+
+            process.Dispose();
+        }
+
+        throw new InvalidOperationException("無法啟動監聽中的旁觀行程");
+    }
+
+    private static void KillQuietly(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch
+        {
+            // 已經結束
+        }
     }
 
     [Fact]
     public async Task 啟動指令本身就是伺服器時辨識出它並能以PID停止且不碰同名的其他行程()
     {
         using Process bystander = StartBystander(out int bystanderPort);
+        ServerService? server = null;
         try
         {
-            int port = FreePort();
-            var log = new LogBuffer();
-            using ServerService server = Service(Config("listen", "{port}"), log, port);
-
-            int? pid = await server.StartAsync(null, CancellationToken.None);
+            int port;
+            int? pid;
+            (server, _, port, pid) = await StartOnFreePortAsync("listen");
 
             Assert.NotNull(pid);
-            Assert.Equal(StartedPid(log), pid);
+            Assert.Equal(server.LastStartedPid, pid);
             Assert.NotEqual(bystander.Id, pid);
             Assert.Equal(ServerState.Running, server.State);
-            Assert.Equal(pid, PortOwnerFinder.FindListenerPid(port));
+            Assert.Equal(new[] { pid!.Value }, PortOwnerFinder.FindListenerPids(port));
 
-            await server.StopAsync(CancellationToken.None);
+            bool stopped = await server.StopAsync(CancellationToken.None);
 
+            Assert.True(stopped);
             Assert.Equal(ServerState.Stopped, server.State);
             Assert.Null(server.ServerPid);
-            Assert.False(Alive(pid!.Value));
+            Assert.False(Alive(pid.Value));
             Assert.False(bystander.HasExited);
             Assert.True(PortOwnerFinder.IsListening(bystanderPort));
-            Assert.False(Contains(log, "/IM"));
         }
         finally
         {
-            bystander.Kill(entireProcessTree: true);
+            if (server is not null)
+            {
+                await server.StopAsync(CancellationToken.None);
+                server.Dispose();
+            }
+
+            KillQuietly(bystander);
         }
     }
 
     [Fact]
     public async Task wrapper的子行程監聽時採用子行程且停止時整棵樹都結束()
     {
-        int port = FreePort();
-        var log = new LogBuffer();
-        using ServerService server = Service(Config("wrap", "{port}"), log, port);
+        ServerService? server = null;
+        try
+        {
+            int port;
+            int? pid;
+            (server, _, port, pid) = await StartOnFreePortAsync("wrap");
 
-        int? pid = await server.StartAsync(null, CancellationToken.None);
+            Assert.NotNull(pid);
+            int wrapperPid = server.LastStartedPid!.Value;
+            Assert.NotEqual(wrapperPid, pid);
+            Assert.Contains(pid!.Value, ChildProcessFinder.DescendantsOf(wrapperPid));
+            Assert.Equal(new[] { pid.Value }, PortOwnerFinder.FindListenerPids(port));
 
-        Assert.NotNull(pid);
-        int wrapperPid = StartedPid(log);
-        Assert.NotEqual(wrapperPid, pid);
-        Assert.Contains(pid!.Value, ChildProcessFinder.DescendantsOf(wrapperPid));
-        Assert.Equal(pid, PortOwnerFinder.FindListenerPid(port));
+            bool stopped = await server.StopAsync(CancellationToken.None);
 
-        await server.StopAsync(CancellationToken.None);
-
-        Assert.False(Alive(pid.Value));
-        Assert.False(Alive(wrapperPid));
-        Assert.Equal(ServerState.Stopped, server.State);
+            Assert.True(stopped);
+            Assert.False(Alive(pid.Value));
+            Assert.False(Alive(wrapperPid));
+            Assert.Equal(ServerState.Stopped, server.State);
+        }
+        finally
+        {
+            if (server is not null)
+            {
+                await server.StopAsync(CancellationToken.None);
+                server.Dispose();
+            }
+        }
     }
 
     [Fact]
     public async Task 啟動指令提早結束時回報結束碼並維持已停止()
     {
-        var log = new LogBuffer();
-        using ServerService server = Service(Config("exit", "3"), log, FreePort());
+        using ServerService server = Service(Config("exit", "3"), new LogBuffer(), FreePort());
 
         int? pid = await server.StartAsync(null, CancellationToken.None);
 
         Assert.Null(pid);
         Assert.Equal(ServerState.Stopped, server.State);
         Assert.Null(server.ServerPid);
-        Assert.True(Contains(log, "結束碼 3"));
+        Assert.Equal(ServerFailure.StartCommandExited, server.LastFailure);
     }
 
     [Fact]
     public async Task 等不到監聽者時逾時並清除啟動的行程樹()
     {
-        var log = new LogBuffer();
-        using ServerService server = Service(Config("idle"), log, FreePort(), timeoutSeconds: 2);
+        using ServerService server = Service(Config("idle"), new LogBuffer(), FreePort(), timeoutSeconds: 2);
 
         int? pid = await server.StartAsync(null, CancellationToken.None);
 
         Assert.Null(pid);
         Assert.Equal(ServerState.Stopped, server.State);
-        Assert.True(Contains(log, "逾時（"));
-        Assert.True(Contains(log, "沒有人監聽"));
-        int started = StartedPid(log);
-        for (int i = 0; i < 30 && Alive(started); i++)
-        {
-            await Task.Delay(100);
-        }
-
+        Assert.Equal(ServerFailure.StartTimedOut, server.LastFailure);
+        int started = server.LastStartedPid!.Value;
+        await WaitGoneAsync(started);
         Assert.False(Alive(started));
     }
 
     [Fact]
     public async Task 啟動被取消時清除啟動的行程並還原狀態()
     {
-        var log = new LogBuffer();
-        using ServerService server = Service(Config("idle"), log, FreePort());
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1.5));
+        using ServerService server = Service(Config("idle"), new LogBuffer(), FreePort());
+        using var cts = new CancellationTokenSource();
 
-        int? pid = await server.StartAsync(null, cts.Token);
-
-        Assert.Null(pid);
-        Assert.Equal(ServerState.Stopped, server.State);
-        int started = StartedPid(log);
-        for (int i = 0; i < 30 && Alive(started); i++)
+        Task<int?> starting = server.StartAsync(null, cts.Token);
+        for (int i = 0; i < 100 && server.LastStartedPid is null; i++)
         {
-            await Task.Delay(100);
+            await Task.Delay(50);
         }
 
+        Assert.NotNull(server.LastStartedPid);
+        int started = server.LastStartedPid!.Value;
+        cts.Cancel();
+
+        Assert.Null(await starting);
+        Assert.Equal(ServerState.Stopped, server.State);
+        Assert.Equal(ServerFailure.StartCancelled, server.LastFailure);
+        await WaitGoneAsync(started);
         Assert.False(Alive(started));
+    }
+
+    [Fact]
+    public async Task 啟動進行中再次啟動只回報執行中而不再開行程()
+    {
+        using ServerService server = Service(Config("idle"), new LogBuffer(), FreePort());
+        using var cts = new CancellationTokenSource();
+
+        Task<int?> starting = server.StartAsync(null, cts.Token);
+        for (int i = 0; i < 100 && server.LastStartedPid is null; i++)
+        {
+            await Task.Delay(50);
+        }
+
+        int first = server.LastStartedPid!.Value;
+        int? second = await server.StartAsync(null, CancellationToken.None);
+
+        Assert.Null(second);
+        Assert.Equal(first, server.LastStartedPid);
+
+        cts.Cancel();
+        Assert.Null(await starting);
+        await WaitGoneAsync(first);
+        Assert.False(Alive(first));
     }
 
     [Fact]
@@ -188,15 +283,16 @@ public sealed class ServerLifecycleTests
     {
         using Process target = StartBystander(out int targetPort);
         using Process bystander = StartBystander(out int bystanderPort);
+        ServerService? server = null;
         try
         {
-            var log = new LogBuffer();
-            using var server = new ServerService(new DiagConfig(), log, targetPort);
+            server = new ServerService(new DiagConfig(), new LogBuffer(), targetPort);
             Assert.Equal(target.Id, server.FindExistingServer());
             server.AdoptExisting(target.Id);
 
-            await server.StopAsync(CancellationToken.None);
+            bool stopped = await server.StopAsync(CancellationToken.None);
 
+            Assert.True(stopped);
             Assert.True(target.WaitForExit(5000));
             Assert.False(bystander.HasExited);
             Assert.True(PortOwnerFinder.IsListening(bystanderPort));
@@ -204,11 +300,118 @@ public sealed class ServerLifecycleTests
         }
         finally
         {
-            bystander.Kill(entireProcessTree: true);
-            if (!target.HasExited)
+            server?.Dispose();
+            KillQuietly(bystander);
+            KillQuietly(target);
+        }
+    }
+
+    [Fact]
+    public async Task 沒有可停止的伺服器時停止回報成功且狀態不變()
+    {
+        using ServerService server = Service(Config("idle"), new LogBuffer(), FreePort());
+
+        bool stopped = await server.StopAsync(CancellationToken.None);
+
+        Assert.True(stopped);
+        Assert.Equal(ServerState.Stopped, server.State);
+    }
+
+    [Fact]
+    public async Task HTTP_sys擁有連接埠且沒設定行程名稱時啟動立即失敗並清除行程()
+    {
+        var system = new FakeSystem { Listeners = new[] { 4 } };
+        using ServerService server = Service(Config("idle"), new LogBuffer(), FreePort(), probes: system.Probes);
+
+        var elapsed = Stopwatch.StartNew();
+        int? pid = await server.StartAsync(null, CancellationToken.None);
+
+        Assert.Null(pid);
+        Assert.Equal(ServerFailure.HttpSysNeedsProcessNames, server.LastFailure);
+        Assert.Equal(ServerState.Stopped, server.State);
+        Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(20));
+        int started = server.LastStartedPid!.Value;
+        await WaitGoneAsync(started);
+        Assert.False(Alive(started));
+    }
+
+    [Fact]
+    public async Task 連接埠被HTTP_sys占用但沒有行程服務它時照常啟動()
+    {
+        var system = new FakeSystem { Listeners = new[] { 4 } };
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            var config = Config("idle") with { ProcessNames = new[] { "iisexpress" } };
+            using ServerService server = Service(config, new LogBuffer(), port, timeoutSeconds: 2, probes: system.Probes);
+
+            int? pid = await server.StartAsync(null, CancellationToken.None);
+
+            Assert.Null(pid);
+            Assert.NotNull(server.LastStartedPid);
+            Assert.Equal(ServerFailure.StartTimedOut, server.LastFailure);
+            int started = server.LastStartedPid!.Value;
+            await WaitGoneAsync(started);
+            Assert.False(Alive(started));
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    [Fact]
+    public async Task 連接埠被監聽且既有行程不能接管時不啟動新行程()
+    {
+        var system = new FakeSystem { Listeners = new[] { 4 } };
+        system.Add(10, "iisexpress", "iisexpress.exe /port:5002", managed: false);
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        try
+        {
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            var config = Config("idle") with { ProcessNames = new[] { "iisexpress" } };
+            using ServerService server = Service(config, new LogBuffer(), port, probes: system.Probes);
+            system.CommandLines[10] = $"iisexpress.exe /port:{port}";
+
+            int? pid = await server.StartAsync(null, CancellationToken.None);
+
+            Assert.Null(pid);
+            Assert.Null(server.LastStartedPid);
+            Assert.Equal(ServerFailure.NotLoadedYet, server.LastFailure);
+            Assert.Equal(ServerState.Stopped, server.State);
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    [Fact]
+    public async Task 命令列超過16383個字元時仍能讀到完整命令列()
+    {
+        var psi = new ProcessStartInfo("dotnet") { UseShellExecute = false, CreateNoWindow = true };
+        psi.ArgumentList.Add(TestServerDll);
+        psi.ArgumentList.Add("idle");
+        psi.ArgumentList.Add(new string('x', 20000));
+        using Process process = Process.Start(psi)!;
+        try
+        {
+            string? commandLine = null;
+            for (int i = 0; i < 50 && commandLine is null; i++)
             {
-                target.Kill(entireProcessTree: true);
+                await Task.Delay(100);
+                commandLine = NativeProcess.CommandLine(process.Id);
             }
+
+            Assert.NotNull(commandLine);
+            Assert.True(commandLine!.Length > 20000);
+        }
+        finally
+        {
+            KillQuietly(process);
         }
     }
 }

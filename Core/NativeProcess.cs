@@ -57,17 +57,29 @@ public static class NativeProcess
                     return null;
                 }
 
-                // UNICODE_STRING：Length（位元組）在位移 0，字串指標在位移 8（x64），內容緊接在同一塊緩衝區
-                int length = Marshal.ReadInt16(buffer, 0);
+                // UNICODE_STRING：Length（無號 16 位元，位元組數）在位移 0，字串指標在位移 8（x64），內容緊接在同一塊緩衝區
+                int length = (ushort)Marshal.ReadInt16(buffer, 0);
                 IntPtr text = Marshal.ReadIntPtr(buffer, IntPtr.Size);
-                return length == 0 || text == IntPtr.Zero ? string.Empty : Marshal.PtrToStringUni(text, length / 2);
+                if (length == 0 || text == IntPtr.Zero)
+                {
+                    return string.Empty;
+                }
+
+                // 字串內容不會超出查詢時配置的緩衝區；超出表示資料不可信
+                long offset = text.ToInt64() - buffer.ToInt64();
+                if (offset < 0 || offset + length > needed)
+                {
+                    return null;
+                }
+
+                return Marshal.PtrToStringUni(text, length / 2);
             }
             finally
             {
                 Marshal.FreeHGlobal(buffer);
             }
         }
-        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+        catch (Exception)
         {
             return null;
         }

@@ -152,7 +152,13 @@ public sealed partial class DiagApp
         busy = "停止伺服器";
         backgroundWork = Task.Run(async () =>
         {
-            await server.StopAsync(cts.Token).ConfigureAwait(false);
+            bool stopped = await server.StopAsync(cts.Token).ConfigureAwait(false);
+            if (!stopped)
+            {
+                status = "伺服器未能停止，已保留監看（按 6 看記錄）";
+                return;
+            }
+
             monitor.Attach(null);
             status = "伺服器已停止";
         });
@@ -187,7 +193,13 @@ public sealed partial class DiagApp
             else if (server.ServerPid is not null)
             {
                 status = "停止伺服器…";
-                await server.StopAsync(cts.Token).ConfigureAwait(false);
+                bool stopped = await server.StopAsync(cts.Token).ConfigureAwait(false);
+                if (!stopped)
+                {
+                    status = "伺服器未能停止，已取消重建與重啟（按 6 看記錄）";
+                    return;
+                }
+
                 monitor.Attach(null);
             }
 

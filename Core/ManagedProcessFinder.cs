@@ -17,7 +17,7 @@ public static class ManagedProcessFinder
 
         Process[] processes =
             processNames.Count > 0
-                ? processNames.SelectMany(Process.GetProcessesByName).ToArray()
+                ? processNames.SelectMany(name => Process.GetProcessesByName(ServerLocator.TrimExe(name))).ToArray()
                 : Process.GetProcesses();
 
         int self = Environment.ProcessId;
