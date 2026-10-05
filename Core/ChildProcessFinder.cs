@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 namespace ClrDiag.Core;
 
 /// <summary>
-/// 用 Win32 Toolhelp32Snapshot 找出某個行程目前的直接子行程 PID。
+/// 用 Win32 Toolhelp32Snapshot 找出某個行程目前的直接子行程與後代行程的 PID。
 ///
 /// 為什麼不用 ManagedProcessFinder.List 這類「對系統上每一個行程開 Process.Modules 找 coreclr.dll」
 /// 的做法：實測在一般開發機上單次呼叫要 5～8 秒（處理序數量多、部分行程的模組列舉又被資安軟體
@@ -66,26 +66,45 @@ public static class ChildProcessFinder
     /// rootPid（快照裡沒有那個中間行程），找不到。
     /// PID 會被重複使用，所以父子連結要同時滿足「子行程的建立時間不早於父行程」才算數
     /// （與 .NET Process 判斷父子關係的規則相同）：記著舊父 PID 的無關行程不會被接進樹裡。
-    /// 讀不到建立時間的子行程無法核對也無法結束，不列入；父行程（例如已結束的 rootPid）
-    /// 讀不到建立時間時，只能憑 PID 連結。
+    /// 子行程讀不到建立時間時無法核對也無法結束，不列入；父行程讀不到建立時間時，它的所有連結都不採用。
+    /// rootStart 是根行程的建立時間，由呼叫端用持有的行程物件讀取（根已結束後 Process.GetProcessById
+    /// 讀不到，但持有的物件仍讀得到）；沒有提供時才改查快照裡的 rootPid。
     /// </summary>
-    public static HashSet<int> DescendantsOf(int rootPid) => Descendants(rootPid, ReadParentMap(), StartTimeOf);
+    public static HashSet<int> DescendantsOf(int rootPid, DateTime? rootStart = null) =>
+        Descendants(rootPid, ReadParentMap(), StartTimeOf, rootStart);
 
     /// <summary>後代判斷本體；父 PID 對照與建立時間查詢由參數提供，供測試用假資料驗證。</summary>
     internal static HashSet<int> Descendants(
         int rootPid,
         IReadOnlyDictionary<int, int> parents,
-        Func<int, DateTime?> startOf
+        Func<int, DateTime?> startOf,
+        DateTime? rootStart = null
     )
     {
+        // 同一次走訪內每個 PID 的建立時間只查一次
+        var starts = new Dictionary<int, DateTime?>();
+        if (rootStart is not null)
+        {
+            starts[rootPid] = rootStart;
+        }
+
+        DateTime? StartOf(int pid)
+        {
+            if (!starts.TryGetValue(pid, out DateTime? value))
+            {
+                value = startOf(pid);
+                starts[pid] = value;
+            }
+
+            return value;
+        }
+
         var result = new HashSet<int>();
         var pending = new Queue<int>();
         pending.Enqueue(rootPid);
         while (pending.Count > 0)
         {
             int current = pending.Dequeue();
-            DateTime? parentStart = null;
-            bool parentStartRead = false;
             foreach (KeyValuePair<int, int> pair in parents)
             {
                 // PID 可能被重複使用而形成環，已經走過的不再加入
@@ -94,18 +113,12 @@ public static class ChildProcessFinder
                     continue;
                 }
 
-                if (startOf(pair.Key) is not { } childStart)
+                if (StartOf(pair.Key) is not { } childStart || StartOf(current) is not { } parentStart)
                 {
                     continue;
                 }
 
-                if (!parentStartRead)
-                {
-                    parentStart = startOf(current);
-                    parentStartRead = true;
-                }
-
-                if (parentStart is { } start && childStart < start)
+                if (childStart < parentStart)
                 {
                     continue;
                 }

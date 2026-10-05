@@ -20,7 +20,7 @@ internal sealed class FakeSystem
             pid => Managed.Contains(pid) ? ".NET Framework" : null,
             pid => Names.GetValueOrDefault(pid),
             pid => Wow64.Contains(pid),
-            pid => Descendants.GetValueOrDefault(pid) ?? new HashSet<int>(),
+            (pid, _) => Descendants.GetValueOrDefault(pid) ?? new HashSet<int>(),
             name => Names.Where(p => p.Value.Equals(name, StringComparison.OrdinalIgnoreCase)).Select(p => p.Key).ToList(),
             pid => CommandLines.GetValueOrDefault(pid)
         );

@@ -26,6 +26,7 @@ public enum ServerFailure
     PortAlreadyListening,
     StopFailed,
     DebugSessionActive,
+    StartedProcessStillRunning,
 }
 
 /// <summary>辨識結果：Pid 為 null 表示沒有辨識出伺服器行程，Reason 是要寫進 6 記錄的原因，Failure 是原因類別。</summary>
@@ -44,7 +45,7 @@ public sealed record LocatorProbes(
     Func<int, string?> RuntimeOf,
     Func<int, string?> ProcessName,
     Func<int, bool> IsWow64,
-    Func<int, IReadOnlyCollection<int>> DescendantsOf,
+    Func<int, DateTime?, IReadOnlyCollection<int>> DescendantsOf,
     Func<string, IReadOnlyList<int>> PidsByName,
     Func<int, string?> CommandLine
 )
@@ -157,12 +158,14 @@ public static partial class ServerLocator
 
     /// <summary>
     /// 辨識伺服器行程。startedRootPid 為本工具剛啟動的行程 PID（啟動流程）；null 表示接管既有行程。
+    /// startedRootStart 是該行程的建立時間（啟動時行程還活著就先讀好），用來核對它底下的父子連結。
     /// </summary>
     public static LocateResult Locate(
         int port,
         IReadOnlyList<string> processNames,
         int? startedRootPid,
-        LocatorProbes? probes = null
+        LocatorProbes? probes = null,
+        DateTime? startedRootStart = null
     )
     {
         probes = (probes ?? LocatorProbes.Default).Memoized();
@@ -189,8 +192,8 @@ public static partial class ServerLocator
 
         int owner = owners[0];
         return owner == HttpSysPid
-            ? LocateHttpSys(port, processNames, startedRootPid, probes)
-            : LocateDirect(port, owner, processNames, startedRootPid, probes);
+            ? LocateHttpSys(port, processNames, startedRootPid, startedRootStart, probes)
+            : LocateDirect(port, owner, processNames, startedRootPid, startedRootStart, probes);
     }
 
     private static LocateResult LocateDirect(
@@ -198,6 +201,7 @@ public static partial class ServerLocator
         int owner,
         IReadOnlyList<string> processNames,
         int? startedRootPid,
+        DateTime? startedRootStart,
         LocatorProbes probes
     )
     {
@@ -206,7 +210,7 @@ public static partial class ServerLocator
         if (
             startedRootPid is { } root
             && owner != root
-            && !probes.DescendantsOf(root).Contains(owner)
+            && !probes.DescendantsOf(root, startedRootStart).Contains(owner)
         )
         {
             return Fail(
@@ -246,6 +250,7 @@ public static partial class ServerLocator
         int port,
         IReadOnlyList<string> processNames,
         int? startedRootPid,
+        DateTime? startedRootStart,
         LocatorProbes probes
     )
     {
@@ -259,19 +264,20 @@ public static partial class ServerLocator
         }
 
         return startedRootPid is { } root
-            ? LocateHttpSysStarted(port, root, processNames, probes)
+            ? LocateHttpSysStarted(port, root, startedRootStart, processNames, probes)
             : LocateHttpSysExisting(port, processNames, probes);
     }
 
     private static LocateResult LocateHttpSysStarted(
         int port,
         int root,
+        DateTime? rootStart,
         IReadOnlyList<string> processNames,
         LocatorProbes probes
     )
     {
         var tree = new List<int> { root };
-        tree.AddRange(probes.DescendantsOf(root));
+        tree.AddRange(probes.DescendantsOf(root, rootStart));
 
         var candidates = new List<int>();
         var skipped32 = new List<string>();

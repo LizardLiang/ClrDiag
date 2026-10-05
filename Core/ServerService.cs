@@ -29,10 +29,11 @@ public readonly record struct ProbeResult(
 /// 伺服器健康狀態以 HTTP 探測取得，不依賴 ASP.NET 效能計數器（很多機器上沒有執行個體）。
 ///
 /// 哪個行程是伺服器，啟動與接管都由 ServerLocator 辨識（監聽設定連接埠的受控行程）；
-/// 停止只依 PID（連同子行程樹）進行，絕不依映像名稱，避免停到同名的無關行程。
+/// 停止只依 PID（連同後代行程）進行，絕不依映像名稱，避免停到同名的無關行程。
 ///
-/// 狀態欄位：state、serverPid、serverStart 的寫入都在 stateLock 內（SetTarget、RestoreAfterFailedStart、
-/// StopAsync、Refresh）。serveProcess 由啟動流程在 stateLock 內寫入；清除則用 Interlocked 交換，
+/// 狀態欄位：state、serverPid、serverStart、port、lastFailure、lastStartedPid 的寫入都在 stateLock 內
+/// （TryBeginStart、SetTarget、RestoreAfterFailedStart、StopAsync、Refresh、State 的 setter 與各屬性的 setter）。
+/// serveProcess 由啟動流程在 stateLock 內寫入；清除則用 Interlocked 交換，
 /// 讓同一個行程只被結束與釋放一次：啟動它的那一次呼叫失敗時（FinishStart）、CleanupStartedProcess、
 /// StopAsync 成功後（StopAsync 以 PID 結束行程，之後才釋放物件）。TryBeginStart 也會釋放已結束的舊行程。
 /// </summary>
@@ -51,6 +52,9 @@ public sealed class ServerService : IDisposable
 
     private readonly object stateLock = new();
     private Process? serveProcess;
+    private int port;
+    private ServerFailure lastFailure;
+    private int? lastStartedPid;
     private ServerState state = ServerState.Stopped;
     private int? serverPid;
     private DateTime? serverStart;
@@ -67,7 +71,7 @@ public sealed class ServerService : IDisposable
         this.log = log;
         locatorProbes = probes ?? LocatorProbes.Default;
         this.control = control ?? ProcessControl.Default;
-        Port = port;
+        this.port = port;
 
         var handler = new SocketsHttpHandler
         {
@@ -82,7 +86,23 @@ public sealed class ServerService : IDisposable
         probeClient = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(8) };
     }
 
-    public int Port { get; private set; }
+    public int Port
+    {
+        get
+        {
+            lock (stateLock)
+            {
+                return port;
+            }
+        }
+        private set
+        {
+            lock (stateLock)
+            {
+                port = value;
+            }
+        }
+    }
 
     /// <summary>啟動後等待伺服器行程出現的上限；測試縮短它以免等滿 30 秒。</summary>
     internal TimeSpan StartTimeout { get; init; } = TimeSpan.FromSeconds(30);
@@ -129,7 +149,10 @@ public sealed class ServerService : IDisposable
         }
     }
 
-    /// <summary>本工具啟動的行程（serveCommand 的行程）是否還被持有；為 true 時 StopAsync 才停得掉它，再啟動前要先停止。</summary>
+    /// <summary>
+    /// 是否還持有本工具啟動的行程物件（serveCommand 啟動的行程，不論它是否已結束）；為 true 時 StopAsync
+    /// 才會結束並釋放它，所以再啟動前要先停止。
+    /// </summary>
     public bool HasStartedProcess
     {
         get
@@ -142,10 +165,35 @@ public sealed class ServerService : IDisposable
     }
 
     /// <summary>最近一次辨識、啟動或停止失敗的原因類別；成功時為 None。</summary>
-    public ServerFailure LastFailure { get; private set; }
+    public ServerFailure LastFailure
+    {
+        get
+        {
+            lock (stateLock)
+            {
+                return lastFailure;
+            }
+        }
+        private set
+        {
+            lock (stateLock)
+            {
+                lastFailure = value;
+            }
+        }
+    }
 
     /// <summary>最近一次 StartAsync 啟動的行程（啟動指令本身）的 PID；沒有啟動過為 null。</summary>
-    public int? LastStartedPid { get; private set; }
+    public int? LastStartedPid
+    {
+        get
+        {
+            lock (stateLock)
+            {
+                return lastStartedPid;
+            }
+        }
+    }
 
     public bool ProbeEnabled { get; set; } = true;
 
@@ -287,7 +335,7 @@ public sealed class ServerService : IDisposable
                     existingPid = serverPid;
                     return false;
                 case ServerState.Debug:
-                    LastFailure = ServerFailure.DebugSessionActive;
+                    lastFailure = ServerFailure.DebugSessionActive;
                     log.Add(
                         "serve",
                         LogKind.Warning,
@@ -300,7 +348,7 @@ public sealed class ServerService : IDisposable
             {
                 if (!HasExited(held))
                 {
-                    LastFailure = ServerFailure.StartError;
+                    lastFailure = ServerFailure.StartedProcessStillRunning;
                     log.Add(
                         "serve",
                         LogKind.Warning,
@@ -387,14 +435,10 @@ public sealed class ServerService : IDisposable
         LastFailure = ServerFailure.None;
         try
         {
-            if (!config.CanServe)
+            if (
+                !CheckCanServe($"設定檔未指定 serveCommand，無法啟動伺服器（可在 {DiagConfig.FileName} 設定，或自行啟動後由本工具附加）")
+            )
             {
-                LastFailure = ServerFailure.NoServeCommand;
-                log.Add(
-                    "serve",
-                    LogKind.Error,
-                    $"設定檔未指定 serveCommand，無法啟動伺服器（可在 {DiagConfig.FileName} 設定，或自行啟動後由本工具附加）"
-                );
                 return null;
             }
 
@@ -428,24 +472,15 @@ public sealed class ServerService : IDisposable
                 portHeldByHttpSys = true;
             }
 
-            try
+            started = LaunchServeProcess("啟動失敗");
+            if (started is null)
             {
-                started = StartWrapperProcess(BuildServeStartInfo());
-            }
-            catch (Exception ex)
-            {
-                LastFailure = ServerFailure.StartError;
-                log.Add("serve", LogKind.Error, $"啟動失敗: {ex.Message}");
                 return null;
             }
 
             Process process = started;
-            lock (stateLock)
-            {
-                serveProcess = process;
-            }
-
-            LastStartedPid = process.Id;
+            // 行程還活著時先讀好建立時間：根結束後 Process.GetProcessById 讀不到，持有的物件才讀得到
+            DateTime? processStart = ChildProcessFinder.SafeStartTime(process);
             log.Add(
                 "serve",
                 LogKind.Info,
@@ -459,7 +494,7 @@ public sealed class ServerService : IDisposable
             {
                 await Task.Delay(StartPollInterval, token).ConfigureAwait(false);
                 bool exited = process.HasExited;
-                last = ServerLocator.Locate(Port, config.ProcessNames, process.Id, locatorProbes);
+                last = ServerLocator.Locate(Port, config.ProcessNames, process.Id, locatorProbes, processStart);
                 if (last.Pid is { } found)
                 {
                     SetTarget(found, ServerState.Running);
@@ -535,7 +570,8 @@ public sealed class ServerService : IDisposable
     ///
     /// 找不到子行程、wrapper 提前結束、或 attach 本身失敗，一律視為失敗、清掉 wrapper 行程並在
     /// 「6 記錄」印出明確原因——絕不會悄悄退化成「附加到 wrapper、中斷點全部不會命中」的狀態。
-    /// 啟動前的狀態檢查與 StartAsync 相同（TryBeginStart）：已有除錯階段、啟動中或執行中都拒絕。
+    /// 啟動前的狀態檢查與 StartAsync 相同（TryBeginStart）：已有除錯階段、啟動中或執行中，
+    /// 或前一次啟動的行程仍在執行（尚未按 x 停止）都拒絕。
     /// </summary>
     public async Task<int?> StartUnderDebuggerAsync(
         DapSessionService dap,
@@ -554,10 +590,8 @@ public sealed class ServerService : IDisposable
         LastFailure = ServerFailure.None;
         try
         {
-            if (!config.CanServe)
+            if (!CheckCanServe("設定檔未指定 serveCommand，無法在除錯器下啟動"))
             {
-                LastFailure = ServerFailure.NoServeCommand;
-                log.Add("serve", LogKind.Error, $"設定檔未指定 serveCommand，無法在除錯器下啟動");
                 return null;
             }
 
@@ -572,24 +606,13 @@ public sealed class ServerService : IDisposable
                 return null;
             }
 
-            try
+            started = LaunchServeProcess("啟動 wrapper 失敗");
+            if (started is null)
             {
-                started = StartWrapperProcess(BuildServeStartInfo());
-            }
-            catch (Exception ex)
-            {
-                LastFailure = ServerFailure.StartError;
-                log.Add("serve", LogKind.Error, $"啟動 wrapper 失敗: {ex.Message}");
                 return null;
             }
 
             Process wrapper = started;
-            lock (stateLock)
-            {
-                serveProcess = wrapper;
-            }
-
-            LastStartedPid = wrapper.Id;
             log.Add(
                 "serve",
                 LogKind.Info,
@@ -680,18 +703,16 @@ public sealed class ServerService : IDisposable
 
     /// <summary>
     /// 強制結束 root 與它的後代並釋放 root；只動這棵樹，不碰其他行程。
-    /// 後代以行程快照裡的父 PID 連結找出（ChildProcessFinder.DescendantsOf，已核對父子的建立時間）：
+    /// 後代以行程快照裡的父 PID 連結找出（ChildProcessFinder.DescendantsOf，已核對每一層父子的建立時間）：
     /// 根結束後，它的直接子行程仍記著根的 PID，找得到也會結束；中間行程先結束的孫行程不在連結上，找不到。
-    /// 結束前再核對一次：後代的建立時間早於根時，代表 PID 已被別的行程重複使用，不結束。
+    /// 根的建立時間從持有的行程物件讀（根結束後只有這個物件讀得到）；讀不到時所有連結都不採用，只結束根本身。
     /// </summary>
     private static void KillTree(Process root)
     {
-        DateTime? rootStart = null;
         HashSet<int> descendants = new();
         try
         {
-            rootStart = ChildProcessFinder.SafeStartTime(root);
-            descendants = ChildProcessFinder.DescendantsOf(root.Id);
+            descendants = ChildProcessFinder.DescendantsOf(root.Id, ChildProcessFinder.SafeStartTime(root));
             if (!root.HasExited)
             {
                 root.Kill(entireProcessTree: true);
@@ -711,11 +732,6 @@ public sealed class ServerService : IDisposable
             try
             {
                 using Process child = Process.GetProcessById(pid);
-                if (rootStart is { } start && child.StartTime < start)
-                {
-                    continue;
-                }
-
                 child.Kill(entireProcessTree: true);
             }
             catch
@@ -723,6 +739,46 @@ public sealed class ServerService : IDisposable
                 // 已經結束，略過
             }
         }
+    }
+
+    /// <summary>設定檔有 serveCommand 才回傳 true；否則記下原因類別與 message 並回傳 false。</summary>
+    private bool CheckCanServe(string message)
+    {
+        if (config.CanServe)
+        {
+            return true;
+        }
+
+        LastFailure = ServerFailure.NoServeCommand;
+        log.Add("serve", LogKind.Error, message);
+        return false;
+    }
+
+    /// <summary>
+    /// 啟動 serveCommand 的行程，成功時發佈為 serveProcess 並記下 LastStartedPid；失敗時記下 StartError 與
+    /// 「{failurePrefix}: 原因」並回傳 null。StartAsync 與 StartUnderDebuggerAsync 共用。
+    /// </summary>
+    private Process? LaunchServeProcess(string failurePrefix)
+    {
+        Process process;
+        try
+        {
+            process = StartWrapperProcess(BuildServeStartInfo());
+        }
+        catch (Exception ex)
+        {
+            LastFailure = ServerFailure.StartError;
+            log.Add("serve", LogKind.Error, $"{failurePrefix}: {ex.Message}");
+            return null;
+        }
+
+        lock (stateLock)
+        {
+            serveProcess = process;
+            lastStartedPid = process.Id;
+        }
+
+        return process;
     }
 
     /// <summary>組出啟動伺服器用的 ProcessStartInfo；StartAsync 與 StartUnderDebuggerAsync 共用。</summary>
@@ -761,8 +817,18 @@ public sealed class ServerService : IDisposable
             log.Add("serve", LogKind.Error, e.Data ?? string.Empty);
 
         process.Start();
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
+        try
+        {
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+        }
+        catch
+        {
+            // 行程已經啟動卻接不上輸出：不留下沒人持有的行程
+            KillTree(process);
+            throw;
+        }
+
         return process;
     }
 
@@ -814,10 +880,11 @@ public sealed class ServerService : IDisposable
         string.Equals(LocatorProbes.ProcessNameOf(pid), "conhost", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// 停止伺服器：只依 PID（本工具啟動的行程、ServerPid）連同子行程樹（/T）結束，絕不依映像名稱。
+    /// 停止伺服器：只依 PID（本工具啟動的行程、ServerPid）連同後代行程（/T）結束，絕不依映像名稱。
     /// 先送正常關閉訊號，因為以 IIS Express 為例，強制砍掉會讓 http.sys 留下 URL 註冊，
     /// 下次啟動同一個埠就會出現 0x800700b7；逾時沒結束才強制結束同一批 PID。
-    /// 結束前一律核對行程建立時間：讀不到建立時間或與記錄不符（PID 已被別的行程重複使用）就不動它。
+    /// 結束前一律核對行程建立時間：與記錄不符（PID 已被別的行程重複使用）視為原本的行程已結束，不動它；
+    /// 讀不到建立時間（例如沒有權限）時無法確認是原本的行程，不動它並警告。
     /// 回傳 true 表示行程確實都結束了（或本來就沒有可停止的行程）；
     /// false 表示行程仍在執行或正在啟動／停止中，狀態與 PID 保持原樣並記錄警告。
     /// </summary>
@@ -853,6 +920,7 @@ public sealed class ServerService : IDisposable
         }
 
         bool stopped = false;
+        var warned = new HashSet<int>();
         try
         {
             targets = targets.Where(IsProcessAlive).ToList();
@@ -861,7 +929,7 @@ public sealed class ServerService : IDisposable
             bool signalSent = false;
             foreach (ProcIdent target in targets)
             {
-                signalSent |= SendKill(target, force: false);
+                signalSent |= SendKill(target, force: false, warned);
             }
 
             if (signalSent)
@@ -882,7 +950,7 @@ public sealed class ServerService : IDisposable
                 );
                 foreach (ProcIdent target in alive)
                 {
-                    SendKill(target, force: true);
+                    SendKill(target, force: true, warned);
                 }
 
                 await WaitUntilGoneAsync(alive, StopForceAttempts, token).ConfigureAwait(false);
@@ -1041,24 +1109,35 @@ public sealed class ServerService : IDisposable
     }
 
     /// <summary>
-    /// 以 PID 結束行程與它的子行程樹；force 為 false 時只送正常關閉訊號。回傳是否成功送出。
-    /// 只有讀得到建立時間、而且與記錄相符才送：讀不到時無法確認它還是原本的行程，寧可不動。
+    /// 以 PID 結束行程與它的後代行程；force 為 false 時只送正常關閉訊號。回傳是否成功送出。
+    /// 建立時間與記錄不符時 PID 已被別的行程使用，原本的行程視為已結束，不動它也不警告；
+    /// 讀不到建立時間時無法確認它還是原本的行程，不動它，同一個 PID 只警告一次（warned）。
     /// </summary>
-    private bool SendKill(ProcIdent target, bool force)
+    private bool SendKill(ProcIdent target, bool force, HashSet<int> warned)
     {
-        // 送出前再核對一次：等待期間 PID 可能已被別的行程使用
-        if (!IsProcessAlive(target))
+        // 送出前再核對一次：等待期間 PID 可能已被別的行程使用；建立時間只讀一次
+        if (!control.IsRunning(target.Pid))
         {
             return false;
         }
 
-        if (target.Start is not { } expected || control.StartTime(target.Pid) != expected)
+        DateTime? actual = control.StartTime(target.Pid);
+        if (target.Start is { } expected && actual is { } current && current != expected)
         {
-            log.Add(
-                "serve",
-                LogKind.Warning,
-                $"PID {target.Pid} 的建立時間讀不到或與記錄不符，無法確認它還是原本的行程，未送出結束指令；請手動結束"
-            );
+            return false;
+        }
+
+        if (target.Start is null || actual is null)
+        {
+            if (warned.Add(target.Pid))
+            {
+                log.Add(
+                    "serve",
+                    LogKind.Warning,
+                    $"PID {target.Pid} 讀不到建立時間（可能沒有權限），無法確認是原本的行程，未送出結束指令；請確認後自行結束"
+                );
+            }
+
             return false;
         }
 

@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using ClrDiag.Core;
 using static ClrDiag.Tests.TestPorts;
+using static ClrDiag.Tests.TestProcesses;
 
 namespace ClrDiag.Tests;
 
@@ -13,15 +14,6 @@ namespace ClrDiag.Tests;
 /// </summary>
 public sealed class ServerLifecycleTests
 {
-    private static readonly string TestServerDll = Path.Combine(AppContext.BaseDirectory, "ClrDiag.TestServer.dll");
-
-    private static DiagConfig Config(string mode, params string[] extra) =>
-        new()
-        {
-            ServeCommand = "dotnet",
-            ServeArguments = new[] { TestServerDll, mode }.Concat(extra).ToArray(),
-        };
-
     private static ServerService Service(
         DiagConfig config,
         LogBuffer log,
@@ -29,19 +21,6 @@ public sealed class ServerLifecycleTests
         int timeoutSeconds = 30,
         LocatorProbes? probes = null
     ) => new(config, log, port, probes) { StartTimeout = TimeSpan.FromSeconds(timeoutSeconds) };
-
-    private static bool Alive(int pid)
-    {
-        try
-        {
-            using Process process = Process.GetProcessById(pid);
-            return !process.HasExited;
-        }
-        catch (ArgumentException)
-        {
-            return false;
-        }
-    }
 
     private static async Task WaitGoneAsync(int pid)
     {
@@ -108,21 +87,6 @@ public sealed class ServerLifecycleTests
         throw new InvalidOperationException("無法啟動監聽中的旁觀行程");
     }
 
-    private static void KillQuietly(Process process)
-    {
-        try
-        {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
-        }
-        catch
-        {
-            // 已經結束
-        }
-    }
-
     [Fact]
     public async Task 啟動指令本身就是伺服器時辨識出它並能以PID停止且不碰同名的其他行程()
     {
@@ -157,7 +121,7 @@ public sealed class ServerLifecycleTests
                 server.Dispose();
             }
 
-            KillQuietly(bystander);
+            Kill(bystander);
         }
     }
 
@@ -299,7 +263,7 @@ public sealed class ServerLifecycleTests
             {
                 if (process is not null)
                 {
-                    KillQuietly(process);
+                    Kill(process);
                     process.Dispose();
                 }
             }
@@ -411,7 +375,7 @@ public sealed class ServerLifecycleTests
         }
         finally
         {
-            KillQuietly(process);
+            Kill(process);
         }
     }
 
@@ -434,28 +398,21 @@ public sealed class ServerLifecycleTests
         }
         finally
         {
-            KillQuietly(target);
+            Kill(target);
         }
     }
 
     [Fact]
     public async Task 除錯階段進行中再次啟動不結束既有的伺服器行程()
     {
-        bool failLocate = false;
-        LocatorProbes probes = LocatorProbes.Default with
-        {
-            // 啟動後讓「連接埠已被監聽但辨識不出擁有者」成立，走接管失敗的分支
-            ListenerPids = port => failLocate ? new[] { 900, 901 } : PortOwnerFinder.FindListenerPids(port),
-        };
         int port = FreePort();
-        using ServerService server = Service(Config("listen", "{port}"), new LogBuffer(), port, probes: probes);
+        using ServerService server = Service(Config("listen", "{port}"), new LogBuffer(), port);
         int? pid = await server.StartAsync(null, CancellationToken.None);
         try
         {
             Assert.NotNull(pid);
             // 除錯器附加到目前的伺服器行程（例如對它按 attach），狀態變成 Debug
             server.AdoptDebuggee(pid!.Value);
-            failLocate = true;
 
             int? second = await server.StartAsync(null, CancellationToken.None);
 
@@ -467,7 +424,6 @@ public sealed class ServerLifecycleTests
         }
         finally
         {
-            failLocate = false;
             if (pid is not null)
             {
                 server.AdoptExisting(pid.Value);
