@@ -705,7 +705,7 @@ public sealed class ServerService : IDisposable
     /// 強制結束 root 與它的後代並釋放 root；只動這棵樹，不碰其他行程。
     /// 後代以行程快照裡的父 PID 連結找出（ChildProcessFinder.DescendantsOf，已核對每一層父子的建立時間）：
     /// 根結束後，它的直接子行程仍記著根的 PID，找得到也會結束；中間行程先結束的孫行程不在連結上，找不到。
-    /// 根的建立時間從持有的行程物件讀（根結束後只有這個物件讀得到）；讀不到時所有連結都不採用，只結束根本身。
+    /// 根的建立時間從持有的行程物件讀（根結束後只有這個物件讀得到）；讀不到時根底下的連結都不採用（根還活著時，Kill 的整棵樹結束仍會動到它的後代）。
     /// </summary>
     private static void KillTree(Process root)
     {
