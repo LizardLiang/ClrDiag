@@ -385,12 +385,7 @@ public sealed partial class DiagApp
     /// <summary>在可監看的受控行程間切換目標（依設定的行程名稱，未設定時列出全部受控行程）。</summary>
     private void CycleTargetProcess()
     {
-        List<ManagedProcessInfo> candidates = ManagedProcessFinder.List(config.ProcessNames);
-
-        if (candidates.Count == 0 && config.ProcessNames.Length > 0)
-        {
-            candidates = ManagedProcessFinder.List(Array.Empty<string>());
-        }
+        List<ManagedProcessInfo> candidates = ManagedProcessFinder.ListForPicking(config.ProcessNames, out _);
 
         if (candidates.Count == 0)
         {

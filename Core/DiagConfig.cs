@@ -58,8 +58,20 @@ public sealed record DiagConfig
 
     // --- 監看目標 ---
 
-    /// <summary>要尋找的行程名稱（不含 .exe），依序比對。空陣列 = 列出所有受控行程讓使用者挑；儀表板只自動接管監聽 Port 的受控行程（HTTP.sys 站台請設定名稱）；不加 --pid 的批次指令仍挑工作集最大者。</summary>
-    public string[] ProcessNames { get; init; } = Array.Empty<string>();
+    /// <summary>
+    /// 伺服器行程的映像名稱（不含 .exe）。空陣列 = 只靠連接埠辨識：自動接管（儀表板、s 鍵、不加 --pid 的批次指令）
+    /// 只認監聽 Port 的受控行程，名稱不限。寫了名稱就多一道條件——行程名稱必須在清單內；
+    /// HTTP.sys 站台（IIS Express、w3wp）的連接埠監聽記在系統行程名下，必須寫名稱才能接管既有行程
+    /// （再用命令列的 /port: 比對連接埠）。舊式 ASP.NET 專案省略時推斷為 iisexpress。
+    /// 不再依「工作集最大」挑選；p 鍵與 --list 只是列出清單讓使用者自己挑。null 視為空陣列。
+    /// </summary>
+    public string[] ProcessNames
+    {
+        get => processNames;
+        init => processNames = value ?? Array.Empty<string>();
+    }
+
+    private readonly string[] processNames = Array.Empty<string>();
 
     /// <summary>視為「自己的程式碼」的命名空間前綴，用於標記執行緒與堆疊。空 = 以「非框架」判斷。</summary>
     public string[] AppNamespaces { get; init; } = Array.Empty<string>();
@@ -288,7 +300,7 @@ public sealed record DiagConfig
         if (target is not null && File.Exists(target))
         {
             ResolvedBuildProject = target;
-            IsSdkProject = DetectSdkProject(target);
+            IsSdkProject = ProjectFile.IsSdkStyle(target);
         }
         else if (target is not null)
         {
@@ -324,38 +336,6 @@ public sealed record DiagConfig
         }
 
         return null;
-    }
-
-    /// <summary>SDK 樣式專案（Project Sdk="..."）用 dotnet build；舊式 .NET Framework 專案需要 MSBuild。</summary>
-    private static bool DetectSdkProject(string projectFile)
-    {
-        if (
-            Path.GetExtension(projectFile).Equals(".sln", StringComparison.OrdinalIgnoreCase)
-            || Path.GetExtension(projectFile).Equals(".slnx", StringComparison.OrdinalIgnoreCase)
-        )
-        {
-            return false;
-        }
-
-        try
-        {
-            foreach (string line in File.ReadLines(projectFile).Take(10))
-            {
-                if (
-                    line.Contains("<Project", StringComparison.Ordinal)
-                    && line.Contains("Sdk=", StringComparison.Ordinal)
-                )
-                {
-                    return true;
-                }
-            }
-        }
-        catch
-        {
-            // 讀不到就當成舊式專案
-        }
-
-        return false;
     }
 
     /// <summary>用 vswhere 找出 MSBuild.exe，不需要開啟 Visual Studio。</summary>

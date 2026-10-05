@@ -111,7 +111,7 @@ clrdiag 依下列順序決定要用哪個專案：
 | `serveArguments`  | 啟動參數，同樣支援佔位符                                                  |
 | `port`            | 預設連接埠（`--port` 可覆寫）                                             |
 | `probeUrl`        | 健康探測網址，支援 `{port}`                                               |
-| `processNames`    | 要尋找的行程名稱。留空 = `--list` 與 `p` 列出所有載入 CLR 的行程；儀表板啟動時只接管監聽 `port` 的受控行程，找不到就不接管（原因寫在 `6 記錄`）；IIS Express／w3wp 這類 HTTP.sys 站台請設定 `processNames`。不加 `--pid` 的批次指令仍挑工作集最大的受控行程 |
+| `processNames`    | 伺服器行程的映像名稱（不含 .exe）。留空 = 只靠連接埠辨識：儀表板、`s` 鍵與不加 `--pid` 的批次指令只接管**監聽 `port` 的受控行程**（64 位元），名稱不限；`--list` 與 `p` 只是列出所有載入 CLR 的行程讓你自己挑。寫了名稱 = 多一道條件，行程名稱必須在清單內（不再依「工作集最大」挑選）。IIS Express／w3wp 這類 HTTP.sys 站台的連接埠監聽記在系統行程（PID 4）名下，必須寫名稱才能接管既有行程，再以命令列的 `/port:` 比對連接埠。舊式 ASP.NET 專案省略時推斷為 `iisexpress`。`null` 視為空陣列 |
 | `appNamespaces`   | 視為「自己程式碼」的命名空間前綴。留空 = 以「非框架」近似判斷              |
 | `reportDirectory` | CSV 輸出目錄                                                              |
 | `dapEnabled`      | 是否啟用除錯功能（spawn netcoredbg、開具名管道）。預設 `true`             |
@@ -125,13 +125,25 @@ clrdiag 依下列順序決定要用哪個專案：
 
 | 專案類型 | 推斷的啟動方式 | 連接埠來源 |
 | -------- | -------------- | ---------- |
-| `Sdk="Microsoft.NET.Sdk.Web"`（屬性或 `<Sdk Name=…/>`） | `dotnet run --project {project} --urls http://localhost:{port}`（除錯時與手寫的 `dotnet run` 一樣當作 wrapper 處理） | `Properties/launchSettings.json` 第一個 profile 的 `applicationUrl` 的 http 連接埠，沒有則 5000 |
-| 舊式 ASP.NET Web 應用程式（`ProjectTypeGuids` 含 `{349c5851-65df-11da-9384-00065b846f21}`） | `iisexpress.exe /path:<專案資料夾> /port:{port}`；`processNames` 預設 `["iisexpress"]` | `<專案檔>.user` 的 `DevelopmentServerPort` → 專案檔的 `DevelopmentServerPort` → `IISUrl` 的 http 連接埠（`.user` 優先）→ 5000 |
+| `Sdk="Microsoft.NET.Sdk.Web"`（屬性或 `<Sdk Name=…/>`） | `dotnet run --project {project} --urls http://localhost:{port}`（除錯時與手寫的 `dotnet run` 一樣當作 wrapper 處理） | `Properties/launchSettings.json` 第一個有 http `applicationUrl` 的 profile 的連接埠（只有 https 的 profile 略過），沒有則 5000 |
+| 舊式 ASP.NET Web 應用程式（`ProjectTypeGuids` 含 `{349c5851-65df-11da-9384-00065b846f21}`） | `iisexpress.exe /path:<專案資料夾> /port:{port}`；`processNames` 預設 `["iisexpress"]` | `IISUrl` 的 http 連接埠（`<專案檔>.user` 優先，其次專案檔）→ `DevelopmentServerPort`（`.user` 優先，其次專案檔）→ 5000 |
 | 其他（主控台、類別庫、`.sln`／`.slnx`） | 不推斷，只能附加到既有行程，原因寫在 `6 記錄` | 5000 |
 
 舊式專案在 `Program Files` 與 `Program Files (x86)` 的 `IIS Express` 資料夾都找不到 `iisexpress.exe` 時不推斷，原因寫在 `6 記錄`。clrdiag 不讀 `Web.config` 與連線字串。推斷出的 IIS Express 指令不是 `dotnet run` wrapper，除錯啟動（netcoredbg 只支援 .NET Core）不適用舊式專案。
 
-因為推斷在載入設定時做一次，所有模式看到同一份結果：舊式 ASP.NET 專案沒有 `clrdiag.json` 時，`processNames` 變成 `iisexpress`，不加 `--pid` 的批次指令因此優先挑 `iisexpress` 行程（沒有時仍退回挑工作集最大的受控行程）。要改監看別的行程，加 `--pid`，或在 `clrdiag.json` 寫 `processNames`。
+因為推斷在載入設定時做一次，所有模式看到同一份結果：舊式 ASP.NET 專案沒有 `clrdiag.json` 時，`processNames` 變成 `iisexpress`，連接埠為推斷值（例如 GSS.HAS.Web 是 58649）。`6 記錄` 的推斷說明會列出實際指令（含 `/path:`）與有效連接埠。`clrdiag --init` 產生的範本不寫 `port` 與 `processNames`（寫了就會覆蓋推斷），要覆蓋再自己加。
+
+### 辨識與停止伺服器行程
+
+啟動（`s`）、接管既有行程（儀表板啟動與 `s` 遇到連接埠已被監聽）與不加 `--pid` 的批次指令用同一套規則：
+
+- 只認監聽 `port` 的行程，而且必須是 64 位元受控行程；設定了 `processNames` 時名稱也要符合。
+- 啟動時，監聽者必須是啟動的行程本身或它的子行程。`dotnet run` 的 MSBuild、編譯伺服器等不監聽連接埠，不會被當成伺服器。
+- HTTP.sys 站台（IIS Express）啟動時，從啟動的行程樹挑符合 `processNames` 的行程；接管既有的 IIS Express 時以命令列的 `/port:` 比對。
+- 連接埠沒人監聽、查詢失敗、有多個候選、擁有者不是受控行程或是 32 位元行程（例如只有 x86 的 IIS Express）時，一律不接管，原因寫在 `6 記錄`；可用 `p` 或 `--pid` 指定。
+- 啟動後最多等 30 秒讓伺服器開始監聽；逾時或失敗會結束啟動的行程樹，不留下殘留行程。
+
+`x` 停止只依 PID（連同子行程樹）進行：先送正常關閉訊號，沒反應再強制結束；絕不依映像名稱結束行程，所以不會動到同名的其他 `iisexpress`／`dotnet`。確認行程真的結束才顯示已停止，否則在 `6 記錄` 警告並保留監看。批次指令（沒有 `--pid`）的行為變更：不再挑「工作集最大」的行程，也不再在名稱找不到時退回任一受控行程。
 
 其他常見情境：
 

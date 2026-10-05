@@ -50,13 +50,14 @@ clrdiag --list
 `--list` prints a table of PID, process name, runtime, and working set. It prints
 at most 30 rows. It exits with code 1 when no managed process is running. When
 `processNames` in the config matches nothing, it warns and lists every managed
-process instead.
+process instead. The list is only for picking a PID yourself.
 
 **Target selection.** Every batch command accepts `--pid N`. Without `--pid`, the
-tool picks the best match from `processNames`. The dashboard does not pick an
-unrelated process: with empty `processNames` it adopts only the managed process that
-listens on the configured port. Pass `--pid` whenever more than one
-candidate exists. Ambiguity produces a correct report about the wrong process.
+dashboard, the `s` key, and batch commands use one rule. They pick only the 64-bit managed
+process that listens on the configured port. When `processNames` is set, the process
+name must also match. Nothing is picked when no process listens, when several candidates
+exist, when the owner is not managed, or when it is 32-bit. The reason is logged in tab 6
+(batch commands print it). Pass `--pid` to choose a process yourself. Ambiguity produces a correct report about the wrong process.
 
 **Working directory.** Without `--root` or `--config`, the tool scans down the
 current directory (depth 5) for `.sln`, `.slnx`, `.csproj`, and `.vbproj` files.
@@ -155,7 +156,7 @@ Every field is optional. JSON comments and trailing commas are accepted.
 | `serveArguments` | Server argument array. Supports placeholders. |
 | `port` | Default port. Default `5000`. `--port` overrides it. |
 | `probeUrl` | Health probe URL. Supports `{port}`. Default `http://localhost:{port}/`. |
-| `processNames` | Process names to find. Empty means `--list` and the picker scan every process that loaded the CLR. The dashboard adopts only the managed process that listens on `port`. It adopts nothing when no process listens there, and it logs the reason in tab 6. HTTP.sys sites (IIS Express, w3wp) need `processNames`. Batch commands without `--pid` still pick the largest managed process. |
+| `processNames` | Image names of the server process (no .exe). Empty means port-only identification: only the managed process that listens on `port` is adopted, with any name. `--list` and the picker still list every process that loaded the CLR for you to choose. A name adds a condition: the process name must be in the list (no more "largest working set"). HTTP.sys sites (IIS Express, w3wp) record their listener under system PID 4, so they need `processNames`. ClrDiag then matches the `/port:` argument in the command line. Old ASP.NET projects default to `["iisexpress"]`. `null` means empty. |
 | `appNamespaces` | Namespace prefixes counted as "own code". Empty means approximate by "not a framework type". |
 | `reportDirectory` | CSV output directory. Default `.clrdiag-reports`. |
 | `dapEnabled` | Enable the debug features. Default `true`. `false` spawns nothing and opens no pipe. |
@@ -171,15 +172,25 @@ writes one line in tab 6 that says what it inferred and from which file. Values 
 
 | Project | Inferred start | Port source |
 |---|---|---|
-| `Sdk="Microsoft.NET.Sdk.Web"` | `dotnet run --project {project} --urls http://localhost:{port}` (a wrapper, same as a configured `dotnet run`) | First profile `applicationUrl` http port in `Properties/launchSettings.json`, else `5000` |
-| Old ASP.NET Web App (`ProjectTypeGuids` has `{349c5851-65df-11da-9384-00065b846f21}`) | `iisexpress.exe /path:<project folder> /port:{port}`, `processNames` defaults to `["iisexpress"]` | `DevelopmentServerPort` in `<project>.user`, then the project file, then the http `IISUrl`, else `5000` |
-| Console app, class library, `.sln` | None. Attach-only. The reason is logged in tab 6. | `5000` |
+| `Sdk="Microsoft.NET.Sdk.Web"` | `dotnet run --project {project} --urls http://localhost:{port}` (a wrapper, same as a configured `dotnet run`) | First profile with an http `applicationUrl` in `Properties/launchSettings.json` (https-only profiles are skipped), else `5000` |
+| Old ASP.NET Web App (`ProjectTypeGuids` has `{349c5851-65df-11da-9384-00065b846f21}`) | `iisexpress.exe /path:<project folder> /port:{port}`, `processNames` defaults to `["iisexpress"]` | http `IISUrl` (`<project>.user` first, then the project file), then `DevelopmentServerPort` (same order), else `5000` |
+| Console app, class library, `.sln`, `.slnx` | None. Attach-only. The reason is logged in tab 6. | `5000` |
 
 If `iisexpress.exe` is missing from `Program Files` and `Program Files (x86)`, ClrDiag infers nothing
 and logs the reason. ClrDiag never reads `Web.config` or connection strings. Because the inference
 runs once in config loading, batch commands see it too: an old ASP.NET project with no
-`clrdiag.json` gets `processNames` `["iisexpress"]`, so batch commands without `--pid` prefer
-the `iisexpress` process. Pass `--pid` to choose another one.
+`clrdiag.json` gets `processNames` `["iisexpress"]` and the inferred port. Tab 6 shows the
+real command, including `/path:`, and the effective port. `clrdiag --init` writes no `port` and
+no `processNames`, because written values override the inference.
+
+**Start, adopt, stop.** The `s` key starts the server and waits up to 30 seconds for a
+listener on the port. The listener must be the started process or its descendant. For IIS
+Express (HTTP.sys) ClrDiag takes the matching process from the started tree. A failed or
+timed-out start kills the started tree. The `x` key stops by PID only, with the child tree
+(`taskkill /T`): a close signal first, then a forced kill. It never stops by image name, so other
+`iisexpress` or `dotnet` processes are never touched. ClrDiag reports "stopped" only after the
+process is gone. Otherwise it logs a warning with the PID in tab 6. A 32-bit process (for example
+an x86-only IIS Express) cannot be diagnosed, so ClrDiag logs that reason and adopts nothing.
 
 Placeholders `{project}`, `{config}`, `{root}`, and `{port}` expand inside
 `buildArguments` and `serveArguments`. `{port}` also expands inside `probeUrl`.

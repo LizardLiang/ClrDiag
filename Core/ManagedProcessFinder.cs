@@ -6,7 +6,7 @@ public sealed record ManagedProcessInfo(int Pid, string Name, long WorkingSet64,
 
 /// <summary>
 /// 找出可監看的受控行程。不綁定特定主機（IIS Express、w3wp、自架 dotnet 皆可）：
-/// 設定檔給了 processNames 就依名稱找，否則掃描所有載入 CLR 的行程（儀表板接管行程不走這裡，見 ServerService.FindExistingServer）。
+/// 提供受控行程的清單與判斷；自動決定要監看哪個行程的規則在 ServerLocator，不在這裡。
 /// </summary>
 public static class ManagedProcessFinder
 {
@@ -59,21 +59,22 @@ public static class ManagedProcessFinder
         return result.OrderByDescending(p => p.WorkingSet64).ToList();
     }
 
-    /// <summary>挑選最可能是目標的受控行程（工作集最大者）。</summary>
-    public static int? FindBest(IReadOnlyList<string> processNames)
+    /// <summary>
+    /// 列出供使用者挑選的受控行程（--list、p 鍵）：依 processNames 列出，名稱都沒有執行中的實例時
+    /// 退回列出全部受控行程，並以 fellBack 告知。只用於「列出讓使用者自己選」；
+    /// 自動決定目標一律走 ServerLocator，不從這份清單挑。
+    /// </summary>
+    public static List<ManagedProcessInfo> ListForPicking(IReadOnlyList<string> processNames, out bool fellBack)
     {
         List<ManagedProcessInfo> candidates = List(processNames);
-
-        // 有指定名稱卻找不到時，退回掃描全部受控行程，避免換了主機方式就完全找不到目標
-        if (candidates.Count == 0 && processNames.Count > 0)
-        {
-            candidates = List(Array.Empty<string>());
-        }
-
-        return candidates.Count == 0 ? null : candidates[0].Pid;
+        fellBack = candidates.Count == 0 && processNames.Count > 0;
+        return fellBack ? List(Array.Empty<string>()) : candidates;
     }
 
-    /// <summary>判斷指定 PID 是否為載入 .NET 執行階段的行程；行程不存在或無法檢查回傳 null。</summary>
+    /// <summary>
+    /// 回傳指定 PID 載入的 .NET 執行階段名稱；不是受控行程、行程不存在、沒有權限檢查或是 32 位元行程
+    /// 一律回傳 null（這幾種情形無法區分）。
+    /// </summary>
     public static string? RuntimeOf(int pid)
     {
         try

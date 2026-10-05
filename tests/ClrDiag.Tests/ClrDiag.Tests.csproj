@@ -18,6 +18,8 @@
 
   <ItemGroup>
     <ProjectReference Include="../../ClrDiag.csproj" />
+    <!-- 假伺服器：ServerService 的啟動／停止測試需要真的會監聽連接埠的受控行程 -->
+    <ProjectReference Include="../ClrDiag.TestServer/ClrDiag.TestServer.csproj" />
   </ItemGroup>
 
   <ItemGroup>

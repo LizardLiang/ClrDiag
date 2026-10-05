@@ -239,7 +239,7 @@ public sealed partial class DiagApp : IDisposable
         log.Add(
             "diag",
             LogKind.Info,
-            $"監看對象: {(config.ProcessNames.Length > 0 ? string.Join(", ", config.ProcessNames) : "所有載入 CLR 的行程")}"
+            $"監看對象: 連接埠 {server.Port} 的監聽行程（受控行程{(config.ProcessNames.Length > 0 ? $"，名稱需為 {string.Join(", ", config.ProcessNames)}" : "，名稱不限")}）"
                 + $"   自己的命名空間: {(config.AppNamespaces.Length > 0 ? string.Join(", ", config.AppNamespaces) : "未設定（以非框架判斷）")}"
         );
     }

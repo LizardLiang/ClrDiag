@@ -278,6 +278,9 @@ catch (Exception ex)
 
 int effectivePort = port ?? config.Port;
 
+// --port 要同時作用在儀表板與批次指令辨識伺服器行程時看的連接埠（ServerLocator 讀 config.Port）
+config = config with { Port = effectivePort };
+
 if (initMode)
 {
     return RunInit(config);
@@ -480,15 +483,21 @@ static int? ResolveTarget(DiagConfig config, int? pid)
         return pid;
     }
 
-    int? found = ManagedProcessFinder.FindBest(config.ProcessNames);
-    if (found is not null)
+    // 與儀表板同一套規則：只認監聽 config.Port 的受控行程（有 processNames 時名稱也要符合）
+    LocateResult located = ServerLocator.Locate(config.Port, config.ProcessNames, startedRootPid: null);
+    if (located.Pid is not null)
     {
-        return found;
+        return located.Pid;
     }
 
-    AnsiConsole.MarkupLine("[red]找不到載入 CLR 的行程[/]");
+    AnsiConsole.MarkupLine("[red]找不到要監看的行程[/]");
+    if (located.Reason is not null)
+    {
+        AnsiConsole.MarkupLine($"[yellow]{Markup.Escape(located.Reason)}[/]");
+    }
+
     AnsiConsole.MarkupLine(
-        "請先啟動要診斷的應用程式，或以 [bold]--pid[/] 指定；[bold]--list[/] 可列出候選行程"
+        "請先啟動要診斷的應用程式（連接埠以 [bold]--port[/] 或設定檔的 port 為準），或以 [bold]--pid[/] 指定；[bold]--list[/] 可列出候選行程"
     );
     return null;
 }
@@ -674,13 +683,12 @@ static int PrintProjectTable(ProjectStateStore store, string workingDir, IReadOn
 /// <summary>列出可監看的受控行程，方便挑 PID。</summary>
 static int RunList(DiagConfig config)
 {
-    List<ManagedProcessInfo> all = ManagedProcessFinder.List(config.ProcessNames);
-    if (all.Count == 0 && config.ProcessNames.Length > 0)
+    List<ManagedProcessInfo> all = ManagedProcessFinder.ListForPicking(config.ProcessNames, out bool fellBack);
+    if (fellBack)
     {
         AnsiConsole.MarkupLine(
             $"[yellow]設定的行程名稱（{string.Join(", ", config.ProcessNames)}）沒有執行中的實例，以下列出所有受控行程[/]"
         );
-        all = ManagedProcessFinder.List(Array.Empty<string>());
     }
 
     if (all.Count == 0)
@@ -730,11 +738,14 @@ static int RunInit(DiagConfig config)
           // 啟動開發伺服器；省略 serveCommand 就只能附加到既有行程
           // "serveCommand": "dotnet",
           // "serveArguments": [ "run", "--project", "{project}", "--urls", "http://localhost:{port}" ],
-          "port": 5000,
+          // 連接埠：省略時依專案類型推斷（舊式 ASP.NET 讀 .csproj.user / .csproj，Sdk.Web 讀 launchSettings.json），
+          // 都沒有才用 5000。寫了就會覆蓋推斷值。
+          // "port": 5000,
           "probeUrl": "http://localhost:{port}/",
 
-          // 監看目標：留空表示掃描所有載入 CLR 的行程
-          "processNames": [],
+          // 監看目標：只認監聽 port 的受控行程；舊式 ASP.NET 專案省略時推斷為 iisexpress。
+          // 寫了 processNames 就會覆蓋推斷值，且行程名稱必須符合才會接管（HTTP.sys 站台請寫名稱，例如 iisexpress）
+          // "processNames": [ "iisexpress" ],
 
           // 視為「自己的程式碼」的命名空間前綴（執行緒與堆疊會標記出來）；留空則以「非框架」判斷
           "appNamespaces": [],

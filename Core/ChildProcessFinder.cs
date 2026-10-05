@@ -5,15 +5,14 @@ namespace ClrDiag.Core;
 /// <summary>
 /// 用 Win32 Toolhelp32Snapshot 找出某個行程目前的直接子行程 PID。
 ///
-/// 為什麼不沿用 ManagedProcessFinder.List／ServerService.SnapshotCandidatePids：那個做法在
-/// 沒設定 processNames 時要對「系統上每一個行程」開 Process.Modules 找 coreclr.dll——實測在
-/// 一般開發機上單次呼叫要 5～8 秒（處理序數量多、部分行程的模組列舉又被資安軟體攔截變慢）。
-/// StartUnderDebuggerAsync 需要每 50ms 就問一次「wrapper 生出子行程了嗎」，這種延遲一輪就把
-/// 輪詢的意義吃光——子行程早就跑過啟動路徑上的中斷點才被偵測到（見規劃討論：實測晚了 7 秒
-/// 以上，遠遠蓋過 ConfigureServices 之類程式碼真正需要的執行時間）。
+/// 為什麼不用 ManagedProcessFinder.List 這類「對系統上每一個行程開 Process.Modules 找 coreclr.dll」
+/// 的做法：實測在一般開發機上單次呼叫要 5～8 秒（處理序數量多、部分行程的模組列舉又被資安軟體
+/// 攔截變慢）。StartUnderDebuggerAsync 需要每 20ms 就問一次「wrapper 生出子行程了嗎」，
+/// 這種延遲一輪就把輪詢的意義吃光——子行程早就跑過啟動路徑上的中斷點才被偵測到
+/// （實測晚了 7 秒以上，遠遠蓋過 ConfigureServices 之類程式碼真正需要的執行時間）。
 ///
 /// Toolhelp32Snapshot 只讀行程清單本身記錄的 PID／PPID／名稱，不開任何行程控制代碼、
-/// 不列舉模組，開銷跟系統行程數量無關，微秒級的呼叫拿來做 50ms 高頻輪詢完全沒問題；
+/// 不列舉模組，開銷跟系統行程數量無關，微秒級的呼叫拿來做 20ms 高頻輪詢完全沒問題；
 /// 用「是不是 wrapper 的直接子行程」取代「是不是新出現的候選行程」，語意上也更精準——
 /// 不需要 CLR 已經載入才能被看見，行程一建立就能偵測到。
 /// </summary>
@@ -54,9 +53,39 @@ public static class ChildProcessFinder
     /// 回傳目前所有以 parentPid 為直接父行程的 PID；快照失敗（極少見）回傳空集合，
     /// 呼叫端應該把它當成「這輪沒看到」而不是硬錯誤，下一輪輪詢再試即可。
     /// </summary>
-    public static List<int> DirectChildrenOf(int parentPid)
+    public static List<int> DirectChildrenOf(int parentPid) =>
+        ReadParentMap().Where(pair => pair.Value == parentPid).Select(pair => pair.Key).ToList();
+
+    /// <summary>
+    /// 回傳 rootPid 底下所有後代行程的 PID（不含 rootPid 本身）。同一份快照一次走完整棵樹；
+    /// Windows 的 PPID 在父行程結束後不會更新，所以已結束的中間行程底下的孫行程仍會被找到。
+    /// </summary>
+    public static HashSet<int> DescendantsOf(int rootPid)
     {
-        var result = new List<int>();
+        Dictionary<int, int> parents = ReadParentMap();
+        var result = new HashSet<int>();
+        var pending = new Queue<int>();
+        pending.Enqueue(rootPid);
+        while (pending.Count > 0)
+        {
+            int current = pending.Dequeue();
+            foreach (KeyValuePair<int, int> pair in parents)
+            {
+                // PID 可能被重複使用而形成環，已經走過的不再加入
+                if (pair.Value == current && pair.Key != rootPid && result.Add(pair.Key))
+                {
+                    pending.Enqueue(pair.Key);
+                }
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>讀取一份行程快照，回傳 PID → 父 PID 對照；快照失敗回傳空表。</summary>
+    private static Dictionary<int, int> ReadParentMap()
+    {
+        var result = new Dictionary<int, int>();
         IntPtr snapshot = CreateToolhelp32Snapshot(Th32csSnapProcess, 0);
         if (snapshot == IntPtr.Zero || snapshot == new IntPtr(-1))
         {
@@ -73,10 +102,7 @@ public static class ChildProcessFinder
 
             do
             {
-                if (entry.th32ParentProcessID == (uint)parentPid)
-                {
-                    result.Add((int)entry.th32ProcessID);
-                }
+                result[(int)entry.th32ProcessID] = (int)entry.th32ParentProcessID;
             } while (Process32Next(snapshot, ref entry));
         }
         finally

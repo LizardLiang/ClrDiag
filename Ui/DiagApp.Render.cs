@@ -840,8 +840,9 @@ public sealed partial class DiagApp
 
         // 時間、來源各佔固定欄，訊息放在自己的欄位：長訊息折行時續行會對齊訊息欄而不是頂到最左邊
         var grid = new Grid();
-        grid.AddColumn(new GridColumn().NoWrap().PadRight(1));
-        grid.AddColumn(new GridColumn().NoWrap().PadRight(1));
+        // 時間固定 8 字元（HH:mm:ss），來源名稱最長 5 字元（build / serve / roots），欄寬固定才不會隨可見的來源忽寬忽窄
+        grid.AddColumn(new GridColumn().NoWrap().Width(8).PadRight(1));
+        grid.AddColumn(new GridColumn().NoWrap().Width(6).PadRight(1));
         grid.AddColumn(new GridColumn());
 
         for (int i = start; i < end; i++)

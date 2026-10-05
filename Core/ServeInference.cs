@@ -13,8 +13,6 @@ public static class ServeInference
     /// <summary>ASP.NET Web 應用程式（舊式專案）的 ProjectTypeGuids 成員。</summary>
     private const string AspNetWebAppGuid = "349c5851-65df-11da-9384-00065b846f21";
 
-    private const string SdkWebName = "Microsoft.NET.Sdk.Web";
-
     private const string IisExpressProcessName = "iisexpress";
 
     /// <summary>推斷結果；Config 是填入欄位後的設定，Note 是要寫進 6 記錄的一行說明。</summary>
@@ -39,22 +37,18 @@ public static class ServeInference
         }
 
         string name = Path.GetFileName(project);
-        string extension = Path.GetExtension(project);
-        if (
-            extension.Equals(".sln", StringComparison.OrdinalIgnoreCase)
-            || extension.Equals(".slnx", StringComparison.OrdinalIgnoreCase)
-        )
+        if (ProjectFile.IsSolution(project))
         {
             return new Result(config, $"未設定 serveCommand，{name} 是方案檔，無法判斷要啟動哪個專案，只能附加到既有行程");
         }
 
-        XElement? root = LoadXml(project);
+        XElement? root = ProjectFile.LoadXml(project);
         if (root is null)
         {
             return new Result(config, $"未設定 serveCommand，無法讀取 {name}，只能附加到既有行程");
         }
 
-        if (IsSdkWeb(root))
+        if (ProjectFile.IsSdkWeb(root))
         {
             return InferDotnetRun(config, project, portConfigured);
         }
@@ -67,20 +61,44 @@ public static class ServeInference
         return new Result(config, $"未設定 serveCommand，{name} 不是網站專案（非 Microsoft.NET.Sdk.Web，也不是 ASP.NET Web 應用程式），只能附加到既有行程");
     }
 
+    /// <summary>連接埠：設定檔明確寫了就用設定檔，否則取推斷到的值，都沒有才用預設。</summary>
+    private static (int Port, string Source) ResolvePort(
+        DiagConfig config,
+        bool portConfigured,
+        Func<(int Port, string Source)?> infer
+    )
+    {
+        if (portConfigured)
+        {
+            return (config.Port, "設定檔");
+        }
+
+        return infer() ?? (config.Port, "預設");
+    }
+
+    /// <summary>推斷出的啟動指令（佔位符已換成實際值，含 /path: 等全部參數），寫進說明讓使用者看到真正執行的內容。</summary>
+    private static string FormatCommand(DiagConfig inferred, int port)
+    {
+        IEnumerable<string> arguments = (inferred.ServeArguments ?? Array.Empty<string>())
+            .Select(argument => inferred.Expand(argument, port: port))
+            .Select(argument => argument.Contains(' ') ? $"\"{argument}\"" : argument);
+        return $"{inferred.ServeCommand} {string.Join(' ', arguments)}";
+    }
+
     private static Result InferDotnetRun(DiagConfig config, string project, bool portConfigured)
     {
         string name = Path.GetFileName(project);
-        int port = config.Port;
-        string portSource = portConfigured ? "設定檔" : "預設";
-        if (!portConfigured)
-        {
-            string launchSettings = Path.Combine(Path.GetDirectoryName(project)!, "Properties", "launchSettings.json");
-            if (ReadLaunchSettingsPort(launchSettings) is { } fromLaunch)
+        (int port, string portSource) = ResolvePort(
+            config,
+            portConfigured,
+            () =>
             {
-                port = fromLaunch;
-                portSource = "Properties/launchSettings.json";
+                string launchSettings = Path.Combine(Path.GetDirectoryName(project)!, "Properties", "launchSettings.json");
+                return ReadLaunchSettingsPort(launchSettings) is { } fromLaunch
+                    ? (fromLaunch, "Properties/launchSettings.json")
+                    : null;
             }
-        }
+        );
 
         string[] arguments = config.ServeArguments
             ?? new[] { "run", "--project", "{project}", "--urls", "http://localhost:{port}" };
@@ -92,7 +110,7 @@ public static class ServeInference
         };
         return new Result(
             inferred,
-            $"未設定 serveCommand，依專案類型推斷：dotnet {string.Join(' ', arguments)}（Sdk.Web 專案 {name}，連接埠 {port} 來源 {portSource}）"
+            $"未設定 serveCommand，依專案類型推斷：{FormatCommand(inferred, port)}（Sdk.Web 專案 {name}，連接埠 {port} 來源 {portSource}）"
         );
     }
 
@@ -112,23 +130,20 @@ public static class ServeInference
             return new Result(config, $"未設定 serveCommand，{name} 是 ASP.NET Web 應用程式但找不到 iisexpress.exe（Program Files 與 Program Files (x86) 都沒有），只能附加到既有行程");
         }
 
-        int port = config.Port;
-        string portSource = portConfigured ? "設定檔" : "預設";
-        if (!portConfigured)
-        {
-            string userFile = project + ".user";
-            XElement? user = File.Exists(userFile) ? LoadXml(userFile) : null;
-            (int Port, string Source)? found =
-                FromElement(user, "DevelopmentServerPort", Path.GetFileName(userFile))
-                ?? FromElement(root, "DevelopmentServerPort", name)
-                ?? FromIisUrl(user, Path.GetFileName(userFile))
-                ?? FromIisUrl(root, name);
-            if (found is { } hit)
+        (int port, string portSource) = ResolvePort(
+            config,
+            portConfigured,
+            () =>
             {
-                port = hit.Port;
-                portSource = hit.Source;
+                // 優先順序：IISUrl（.user、.csproj）的 http 連接埠，其次 DevelopmentServerPort（.user、.csproj）
+                string userFile = project + ".user";
+                XElement? user = File.Exists(userFile) ? ProjectFile.LoadXml(userFile) : null;
+                return FromIisUrl(user, Path.GetFileName(userFile))
+                    ?? FromIisUrl(root, name)
+                    ?? FromElement(user, "DevelopmentServerPort", Path.GetFileName(userFile))
+                    ?? FromElement(root, "DevelopmentServerPort", name);
             }
-        }
+        );
 
         string[] arguments = config.ServeArguments
             ?? new[] { $"/path:{Path.GetDirectoryName(project)}", "/port:{port}" };
@@ -143,7 +158,7 @@ public static class ServeInference
         };
         return new Result(
             inferred,
-            $"未設定 serveCommand，依專案類型推斷：{IisExpressProcessName} /port:{port}（ASP.NET Web 應用程式 {name}，連接埠來源 {portSource}）"
+            $"未設定 serveCommand，依專案類型推斷：{FormatCommand(inferred, port)}（ASP.NET Web 應用程式 {name}，連接埠 {port} 來源 {portSource}）"
         );
     }
 
@@ -173,25 +188,6 @@ public static class ServeInference
 
         return null;
     }
-
-    private static XElement? LoadXml(string path)
-    {
-        try
-        {
-            return XDocument.Load(path).Root;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static bool IsSdkWeb(XElement root) =>
-        string.Equals((string?)root.Attribute("Sdk"), SdkWebName, StringComparison.OrdinalIgnoreCase)
-        || root.Elements().Any(e =>
-            e.Name.LocalName == "Sdk"
-            && string.Equals((string?)e.Attribute("Name"), SdkWebName, StringComparison.OrdinalIgnoreCase)
-        );
 
     private static bool HasAspNetWebAppGuid(XElement root) =>
         root.Descendants()
@@ -234,15 +230,17 @@ public static class ServeInference
                 return null;
             }
 
+            // 第一個只有 https 的設定檔不代表整份沒有 http：繼續找後面的設定檔
             foreach (JsonProperty profile in profiles.EnumerateObject())
             {
                 if (
                     profile.Value.ValueKind == JsonValueKind.Object
                     && profile.Value.TryGetProperty("applicationUrl", out JsonElement url)
                     && url.ValueKind == JsonValueKind.String
+                    && HttpUrlPort(url.GetString()) is { } port
                 )
                 {
-                    return HttpUrlPort(url.GetString());
+                    return port;
                 }
             }
         }

@@ -4,7 +4,7 @@ namespace ClrDiag.Core;
 
 /// <summary>
 /// 查出哪個行程擁有某個連接埠的 TCP 監聽（Win32 GetExtendedTcpTable，同時查 IPv4 與 IPv6）。
-/// 用於沒有設定 processNames 時決定要接管哪個行程：只接管監聽設定連接埠的那一個，
+/// 是 ServerLocator 辨識伺服器行程的依據：只認監聽設定連接埠的行程，
 /// 不去猜系統上任何一個載入 CLR 的行程。
 /// </summary>
 public static class PortOwnerFinder
@@ -37,14 +37,55 @@ public static class PortOwnerFinder
         int reserved
     );
 
-    /// <summary>回傳監聽該連接埠的行程 PID；沒有人監聽或查詢失敗回傳 null。</summary>
-    public static int? FindListenerPid(int port)
+    /// <summary>
+    /// 回傳監聽該連接埠的所有行程 PID（IPv4 與 IPv6 合併、去除重複）；沒有人監聽回傳空清單，
+    /// 兩個位址族的查詢都失敗（API 不存在、呼叫失敗）回傳 null——呼叫端要分辨「沒人監聽」與「查不到」。
+    /// </summary>
+    public static IReadOnlyList<int>? FindListenerPids(int port)
     {
-        return ReadListenerPid(port, AfInet, Row4Size, Row4PortOffset, Row4PidOffset)
-            ?? ReadListenerPid(port, AfInet6, Row6Size, Row6PortOffset, Row6PidOffset);
+        List<int>? v4 = ReadListenerPids(port, AfInet, Row4Size, Row4PortOffset, Row4PidOffset);
+        List<int>? v6 = ReadListenerPids(port, AfInet6, Row6Size, Row6PortOffset, Row6PidOffset);
+        if (v4 is null && v6 is null)
+        {
+            return null;
+        }
+
+        return (v4 ?? new List<int>()).Concat(v6 ?? new List<int>()).Distinct().ToList();
     }
 
-    private static int? ReadListenerPid(
+    /// <summary>
+    /// 回傳監聽該連接埠的行程 PID；沒有人監聽、查詢失敗，或 IPv4 / IPv6 由不同行程監聽（無法判斷
+    /// 哪一個才是目標）都回傳 null。
+    /// </summary>
+    public static int? FindListenerPid(int port)
+    {
+        IReadOnlyList<int>? pids = FindListenerPids(port);
+        return pids is { Count: 1 } ? pids[0] : null;
+    }
+
+    /// <summary>是否有人在該連接埠監聽；查表失敗時退回 IPGlobalProperties 的結果。</summary>
+    public static bool IsListening(int port)
+    {
+        IReadOnlyList<int>? pids = FindListenerPids(port);
+        if (pids is not null)
+        {
+            return pids.Count > 0;
+        }
+
+        try
+        {
+            return System.Net.NetworkInformation.IPGlobalProperties
+                .GetIPGlobalProperties()
+                .GetActiveTcpListeners()
+                .Any(endpoint => endpoint.Port == port);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static List<int>? ReadListenerPids(
         int port,
         int addressFamily,
         int rowSize,
@@ -53,14 +94,23 @@ public static class PortOwnerFinder
     )
     {
         int size = 0;
-        int result = GetExtendedTcpTable(
-            IntPtr.Zero,
-            ref size,
-            false,
-            addressFamily,
-            TcpTableOwnerPidListener,
-            0
-        );
+        int result;
+        try
+        {
+            result = GetExtendedTcpTable(
+                IntPtr.Zero,
+                ref size,
+                false,
+                addressFamily,
+                TcpTableOwnerPidListener,
+                0
+            );
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+        {
+            return null;
+        }
+
         if (result != ErrorInsufficientBuffer || size <= 0)
         {
             return null;
@@ -92,6 +142,7 @@ public static class PortOwnerFinder
                 }
 
                 int count = Marshal.ReadInt32(buffer);
+                var pids = new List<int>();
                 for (int i = 0; i < count; i++)
                 {
                     IntPtr row = buffer + 4 + (i * rowSize);
@@ -101,11 +152,11 @@ public static class PortOwnerFinder
                     int localPort = ((raw & 0xFF) << 8) | (raw >> 8);
                     if (localPort == port)
                     {
-                        return Marshal.ReadInt32(row, pidOffset);
+                        pids.Add(Marshal.ReadInt32(row, pidOffset));
                     }
                 }
 
-                return null;
+                return pids;
             }
             finally
             {

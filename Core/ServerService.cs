@@ -1,6 +1,4 @@
 using System.Diagnostics;
-using System.Net;
-using System.Net.NetworkInformation;
 using System.Net.Security;
 
 namespace ClrDiag.Core;
@@ -29,21 +27,29 @@ public readonly record struct ProbeResult(
 /// 控制開發伺服器。啟動方式完全由設定檔的 serveCommand / serveArguments 決定
 /// （IIS Express 腳本、dotnet run、自訂 script 都可以），未設定時只做附加監看。
 /// 伺服器健康狀態以 HTTP 探測取得，不依賴 ASP.NET 效能計數器（很多機器上沒有執行個體）。
+///
+/// 哪個行程是伺服器，啟動與接管都由 ServerLocator 辨識（監聽設定連接埠的受控行程）；
+/// 停止只依 PID（連同子行程樹）進行，絕不依映像名稱，避免停到同名的無關行程。
 /// </summary>
 public sealed class ServerService : IDisposable
 {
+    private static readonly TimeSpan StartPollInterval = TimeSpan.FromMilliseconds(500);
+
     private readonly DiagConfig config;
     private readonly LogBuffer log;
     private readonly HttpClient probeClient;
     private readonly RingBuffer<ProbeResult> probes = new(120);
     private readonly object gate = new();
 
+    private readonly LocatorProbes locatorProbes;
+
     private Process? serveProcess;
 
-    public ServerService(DiagConfig config, LogBuffer log, int port)
+    public ServerService(DiagConfig config, LogBuffer log, int port, LocatorProbes? probes = null)
     {
         this.config = config;
         this.log = log;
+        locatorProbes = probes ?? LocatorProbes.Default;
         Port = port;
 
         var handler = new SocketsHttpHandler
@@ -60,6 +66,9 @@ public sealed class ServerService : IDisposable
     }
 
     public int Port { get; private set; }
+
+    /// <summary>啟動後等待伺服器行程出現的上限；測試縮短它以免等滿 30 秒。</summary>
+    internal TimeSpan StartTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
     public ServerState State { get; private set; } = ServerState.Stopped;
 
@@ -93,77 +102,21 @@ public sealed class ServerService : IDisposable
     public string Url => config.ExpandProbeUrl(Port);
 
     /// <summary>是否有人在該連接埠監聽（不論是誰啟動的）。</summary>
-    public bool IsPortListening()
-    {
-        try
-        {
-            return IPGlobalProperties
-                .GetIPGlobalProperties()
-                .GetActiveTcpListeners()
-                .Any(endpoint => endpoint.Port == Port);
-        }
-        catch
-        {
-            return false;
-        }
-    }
+    public bool IsPortListening() => PortOwnerFinder.IsListening(Port);
 
     /// <summary>
-    /// 找出要接管的既有行程。設定了 processNames 就只在這些名稱裡挑（找不到不退回掃描全部，
-    /// 避免接管無關的受控行程）；沒設定時只接管監聽設定連接埠的受控行程，找不到就不接管並把原因寫進記錄。
+    /// 找出要接管的既有行程，規則見 ServerLocator：只接管監聽設定連接埠的受控行程（設定了
+    /// processNames 時名稱也要符合）；沒有人監聽、擁有者不明或有多個候選就不接管，原因寫進 6 記錄。
     /// </summary>
     public int? FindExistingServer()
     {
-        if (config.ProcessNames.Length > 0)
+        LocateResult result = ServerLocator.Locate(Port, config.ProcessNames, startedRootPid: null, locatorProbes);
+        if (result.Pid is null && result.Reason is not null)
         {
-            List<ManagedProcessInfo> named = ManagedProcessFinder.List(config.ProcessNames);
-            if (named.Count == 0)
-            {
-                log.Add(
-                    "serve",
-                    LogKind.Info,
-                    $"找不到名稱為 {string.Join("、", config.ProcessNames)} 的受控行程，未接管任何行程"
-                );
-                return null;
-            }
-
-            return named[0].Pid;
+            log.Add("serve", result.Kind, result.Reason);
         }
 
-        int? owner = PortOwnerFinder.FindListenerPid(Port);
-        if (owner is null)
-        {
-            log.Add(
-                "serve",
-                LogKind.Info,
-                $"連接埠 {Port} 查不到監聽的行程（沒有人監聽，或查詢失敗），未接管任何行程（未設定 processNames，不會任選載入 CLR 的行程）"
-            );
-            return null;
-        }
-
-        // HTTP.sys（IIS Express、w3wp）的監聽記在系統行程 PID 4 名下，看不出實際的站台行程
-        if (owner.Value == 4)
-        {
-            log.Add(
-                "serve",
-                LogKind.Warning,
-                $"連接埠 {Port} 由系統 HTTP.sys（PID 4）監聽，無法得知是哪個行程；請在 {DiagConfig.FileName} 設定 processNames（例如 iisexpress），或用 p 鍵 / --pid 指定"
-            );
-            return null;
-        }
-
-        string? runtime = ManagedProcessFinder.RuntimeOf(owner.Value);
-        if (runtime is null)
-        {
-            log.Add(
-                "serve",
-                LogKind.Warning,
-                $"連接埠 {Port} 由 PID {owner} 監聽，但無法確認它是可監看的 64 位元受控行程（可能不是受控行程，或沒有權限檢查），未接管"
-            );
-            return null;
-        }
-
-        return owner;
+        return result.Pid;
     }
 
     /// <summary>掛上外部既有的行程（attach-only 模式）。</summary>
@@ -219,53 +172,75 @@ public sealed class ServerService : IDisposable
         }
 
         State = ServerState.Starting;
-        HashSet<int> before = SnapshotCandidatePids();
-
-        Process process;
+        Process? process = null;
         try
         {
-            process = StartWrapperProcess(BuildServeStartInfo());
+            try
+            {
+                process = StartWrapperProcess(BuildServeStartInfo());
+            }
+            catch (Exception ex)
+            {
+                State = ServerState.Stopped;
+                log.Add("serve", LogKind.Error, $"啟動失敗: {ex.Message}");
+                return null;
+            }
+
             serveProcess = process;
             log.Add(
                 "serve",
                 LogKind.Info,
-                $"{Path.GetFileName(process.StartInfo.FileName)} 啟動中，連接埠 {Port}"
+                $"{Path.GetFileName(process.StartInfo.FileName)}（PID {process.Id}）啟動中，連接埠 {Port}"
             );
+
+            // 每輪只查連接埠擁有者與行程樹（毫秒級），不掃描全部行程的模組
+            var elapsed = Stopwatch.StartNew();
+            LocateResult last;
+            while (true)
+            {
+                await Task.Delay(StartPollInterval, token).ConfigureAwait(false);
+                bool exited = process.HasExited;
+                last = ServerLocator.Locate(Port, config.ProcessNames, process.Id, locatorProbes);
+                if (last.Pid is { } found)
+                {
+                    ServerPid = found;
+                    State = ServerState.Running;
+                    log.Add("serve", LogKind.Success, $"PID {found} 已啟動 → {Url}");
+                    return found;
+                }
+
+                if (exited || elapsed.Elapsed >= StartTimeout)
+                {
+                    break;
+                }
+            }
+
+            string cause = process.HasExited
+                ? $"啟動指令已結束（結束碼 {process.ExitCode}），未辨識出伺服器行程"
+                : $"等待伺服器行程出現逾時（{elapsed.Elapsed.TotalSeconds:F0} 秒），未辨識出伺服器行程";
+            log.Add(
+                "serve",
+                LogKind.Error,
+                last.Reason is null ? cause : $"{cause}：{last.Reason}"
+            );
+            KillStartedTree();
+            State = ServerState.Stopped;
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            KillStartedTree();
+            State = ServerState.Stopped;
+            log.Add("serve", LogKind.Warning, "啟動已取消，已清除啟動的行程");
+            return null;
         }
         catch (Exception ex)
         {
+            KillStartedTree();
             State = ServerState.Stopped;
             log.Add("serve", LogKind.Error, $"啟動失敗: {ex.Message}");
             return null;
         }
-
-        // 啟動指令通常會再開子行程（腳本 → 伺服器），等新行程出現後才取 PID
-        int? found = await WaitForNewPidAsync(
-                before,
-                process,
-                pollInterval: TimeSpan.FromMilliseconds(500),
-                maxAttempts: 60,
-                token
-            )
-            .ConfigureAwait(false);
-
-        if (found is not null)
-        {
-            ServerPid = found;
-            State = ServerState.Running;
-            log.Add("serve", LogKind.Success, $"PID {found} 已啟動 → {Url}");
-            return found;
-        }
-
-        State = ServerState.Stopped;
-        log.Add(
-            "serve",
-            LogKind.Error,
-            process.HasExited
-                ? $"啟動指令已結束（結束碼 {process.ExitCode}），未偵測到新的受控行程"
-                : "等待伺服器行程出現逾時（30 秒）"
-        );
-        return null;
     }
 
     /// <summary>
@@ -274,13 +249,11 @@ public sealed class ServerService : IDisposable
     /// 控制，中斷點永遠不會命中（DiagConfig.IsWrapperServeCommand 的說明）。
     ///
     /// 做法：wrapper 行程照 StartAsync 原樣啟動（不受除錯器控制），但找子行程改用
-    /// ChildProcessFinder.DirectChildrenOf（Toolhelp32Snapshot 直接查 wrapper 的子行程），
-    /// 不是 StartAsync 用的 SnapshotCandidatePids／WaitForNewPidAsync 那套「掃全部行程找
-    /// coreclr.dll、跟啟動前的快照取差集」——實測沒設定 processNames 時那套機制單次呼叫要
-    /// 5～8 秒（機器上行程數量多，逐一開 Modules 檢查很慢），子行程早就跑過啟動路徑上的
-    /// 中斷點才會被偵測到，等於讓這個方法的存在意義落空。ChildProcessFinder 只讀行程清單的
-    /// PID／PPID，不開行程控制代碼、不列舉模組，可以用遠低於 50ms 的間隔輪詢，把「行程出現」
-    /// 到「除錯器接手」的間隔壓到最短。
+    /// ChildProcessFinder.DirectChildrenOf（Toolhelp32Snapshot 直接查 wrapper 的子行程）。
+    /// StartAsync 等的是「連接埠有人監聽」，要等伺服器開始監聽才看得到；除錯啟動要在
+    /// 子行程一出現（遠早於開始監聽）就接手，才趕得上啟動路徑上的中斷點。
+    /// ChildProcessFinder 只讀行程清單的 PID／PPID，不開行程控制代碼、不列舉模組，
+    /// 可以用 20ms 的間隔輪詢，把「行程出現」到「除錯器接手」的間隔壓到最短。
     ///
     /// 這個間隔仍然不是零——不是行程建立時的強制暫停（Win32 CREATE_SUSPENDED 那一類機制），
     /// 只是盡快追上去。極早、只有一兩行就執行完的啟動路徑仍可能撲空；但 DI 期間、
@@ -332,13 +305,24 @@ public sealed class ServerService : IDisposable
             return null;
         }
 
-        int? childPid = await WaitForDirectChildAsync(
-                wrapper,
-                pollInterval: TimeSpan.FromMilliseconds(20),
-                maxAttempts: 1500,
-                token
-            )
-            .ConfigureAwait(false);
+        int? childPid;
+        try
+        {
+            childPid = await WaitForDirectChildAsync(
+                    wrapper,
+                    pollInterval: TimeSpan.FromMilliseconds(20),
+                    maxAttempts: 1500,
+                    token
+                )
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            State = ServerState.Stopped;
+            log.Add("serve", LogKind.Warning, "除錯啟動已取消，已清除 wrapper 行程");
+            CleanupDebugWrapper();
+            return null;
+        }
 
         if (childPid is null)
         {
@@ -369,9 +353,8 @@ public sealed class ServerService : IDisposable
                 $"除錯啟動失敗：附加到 PID {childPid} 失敗（{dap.LastError}）——子行程與 wrapper 行程已一併清除，"
                     + "不會留下沒有除錯器附加、卻繼續佔用連接埠的殭屍行程"
             );
-            // 附加失敗時子行程可能已經在跑（甚至佔著連接埠），跟 wrapper 一起清乾淨，
-            // 不留下「沒有除錯器、也沒人知道」的殭屍行程
-            RunTaskKill($"/PID {childPid}");
+            // 附加失敗時子行程可能已經在跑（甚至佔著連接埠）；它在 wrapper 的行程樹內，
+            // 連同 wrapper 一起清乾淨，不留下「沒有除錯器、也沒人知道」的殭屍行程
             CleanupDebugWrapper();
             return null;
         }
@@ -386,33 +369,54 @@ public sealed class ServerService : IDisposable
     }
 
     /// <summary>
-    /// 清掉 StartUnderDebuggerAsync 啟動的 wrapper 行程。直接 launch（非 wrapper）沒有 wrapper
-    /// 行程可清，這裡呼叫也安全（serveProcess 為 null 時直接略過）。除錯階段結束時
+    /// 清掉 StartUnderDebuggerAsync 啟動的 wrapper 行程（連同它的子行程樹）。直接 launch（非 wrapper）
+    /// 沒有 wrapper 行程可清，這裡呼叫也安全（serveProcess 為 null 時直接略過）。除錯階段結束時
     /// （DisconnectAsync 已經連帶終止子行程）與除錯啟動本身失敗時都會呼叫這個方法收尾。
     /// </summary>
-    public void CleanupDebugWrapper()
+    public void CleanupDebugWrapper() => KillStartedTree();
+
+    /// <summary>
+    /// 強制結束本工具啟動的行程與它的後代並釋放 serveProcess；只動這棵樹，不碰其他行程。
+    /// wrapper 已結束時它的孫行程仍帶著舊的父 PID，所以先收集後代再逐一結束。
+    /// </summary>
+    private void KillStartedTree()
     {
-        Process? wrapper = serveProcess;
-        if (wrapper is null)
+        Process? root = serveProcess;
+        if (root is null)
         {
             return;
         }
 
         serveProcess = null;
+        HashSet<int> descendants = new();
         try
         {
-            if (!wrapper.HasExited)
+            descendants = ChildProcessFinder.DescendantsOf(root.Id);
+            if (!root.HasExited)
             {
-                wrapper.Kill(entireProcessTree: true);
+                root.Kill(entireProcessTree: true);
             }
         }
         catch
         {
-            // wrapper 可能已經自行結束（子行程退出後很多 wrapper 會跟著結束），略過
+            // 行程可能已經自行結束（子行程退出後很多 wrapper 會跟著結束），略過
         }
         finally
         {
-            wrapper.Dispose();
+            root.Dispose();
+        }
+
+        foreach (int pid in descendants)
+        {
+            try
+            {
+                using Process child = Process.GetProcessById(pid);
+                child.Kill(entireProcessTree: true);
+            }
+            catch
+            {
+                // 已經結束，略過
+            }
         }
     }
 
@@ -514,51 +518,10 @@ public sealed class ServerService : IDisposable
     }
 
     /// <summary>
-    /// 等待新的候選行程出現（辨識 wrapper 產生的子行程）；StartAsync 用的差集輪詢邏輯——
-    /// 一般啟動時間不敏感，掃全部受控行程（SnapshotCandidatePids）的開銷可以接受。
-    /// 除錯啟動（StartUnderDebuggerAsync）對時間敏感得多，改用更快的 WaitForDirectChildAsync，
-    /// 不共用這個方法（見該方法的說明）。
-    ///
-    /// 刻意排除 wrapperProcess.Id 本身：若設定的 processNames 剛好也符合 wrapper 執行檔
-    /// （例如 processNames 含 "dotnet"，而 serveCommand 就是 `dotnet run`），wrapper 一啟動
-    /// 就會符合候選條件，若不排除會把 wrapper 自己誤判成「新出現的目標行程」，導致監看
-    /// 到 wrapper 而不是它底下真正的子行程。
-    /// </summary>
-    private async Task<int?> WaitForNewPidAsync(
-        HashSet<int> before,
-        Process wrapperProcess,
-        TimeSpan pollInterval,
-        int maxAttempts,
-        CancellationToken token
-    )
-    {
-        for (int attempt = 0; attempt < maxAttempts; attempt++)
-        {
-            await Task.Delay(pollInterval, token).ConfigureAwait(false);
-
-            int? found = SnapshotCandidatePids()
-                .Except(before)
-                .Where(candidatePid => candidatePid != wrapperProcess.Id)
-                .OrderBy(candidatePid => candidatePid)
-                .Select(candidatePid => (int?)candidatePid)
-                .FirstOrDefault();
-            if (found is not null)
-            {
-                return found;
-            }
-
-            if (wrapperProcess.HasExited)
-            {
-                return null;
-            }
-        }
-
-        return null;
-    }
-
-    /// <summary>
-    /// 停止伺服器。刻意不使用強制終止：以 IIS Express 為例，強制砍掉會讓 http.sys 留下
-    /// URL 註冊，下次啟動同一個埠就會出現 0x800700b7。先送正常關閉訊號，逾時才退而求其次。
+    /// 停止伺服器：只依 PID（本工具啟動的行程、ServerPid）連同子行程樹（/T）結束，絕不依映像名稱。
+    /// 先送正常關閉訊號，因為以 IIS Express 為例，強制砍掉會讓 http.sys 留下 URL 註冊，
+    /// 下次啟動同一個埠就會出現 0x800700b7；逾時沒結束才強制結束同一批 PID。
+    /// 最後確認行程真的結束了才回報已停止，否則留著 PID 與狀態並記錄警告。
     /// </summary>
     public async Task StopAsync(CancellationToken token)
     {
@@ -568,31 +531,58 @@ public sealed class ServerService : IDisposable
             return;
         }
 
+        ServerState previous = State;
         State = ServerState.Stopping;
 
-        if (ServerPid is { } pid)
+        var targets = new List<int>();
+        if (serveProcess is { } started && IsProcessAlive(started.Id))
         {
-            RunTaskKill($"/PID {pid}");
-        }
-        else if (config.ProcessNames.Length > 0)
-        {
-            RunTaskKill($"/IM {config.ProcessNames[0]}.exe");
+            targets.Add(started.Id);
         }
 
-        for (int attempt = 0; attempt < 20; attempt++)
+        if (ServerPid is { } pid && !targets.Contains(pid) && IsProcessAlive(pid))
         {
-            await Task.Delay(500, token).ConfigureAwait(false);
-            if (ServerPid is null || !IsProcessAlive(ServerPid.Value))
+            targets.Add(pid);
+        }
+
+        // taskkill 送出關閉訊號才回傳 0；沒有視窗的行程（dotnet run 的 app 等）送不出去，不必空等
+        bool signalSent = false;
+        foreach (int target in targets)
+        {
+            signalSent |= TaskKill(target, force: false);
+        }
+
+        if (signalSent)
+        {
+            await WaitUntilGoneAsync(targets, attempts: 20, token).ConfigureAwait(false);
+        }
+
+        List<int> alive = targets.Where(IsProcessAlive).ToList();
+        if (alive.Count > 0)
+        {
+            log.Add(
+                "serve",
+                LogKind.Warning,
+                $"PID {string.Join("、", alive)} 未回應關閉訊號，改為強制結束（IIS Express 可能留下 URL 註冊）"
+            );
+            foreach (int target in alive)
             {
-                break;
+                TaskKill(target, force: true);
             }
+
+            await WaitUntilGoneAsync(alive, attempts: 3, token).ConfigureAwait(false);
         }
 
-        if (ServerPid is { } stubborn && IsProcessAlive(stubborn) && config.ProcessNames.Length > 0)
+        List<int> survivors = targets.Where(IsProcessAlive).ToList();
+        if (survivors.Count > 0)
         {
-            log.Add("serve", LogKind.Warning, "行程未回應關閉訊號，改以映像名稱再送一次");
-            RunTaskKill($"/IM {config.ProcessNames[0]}.exe");
-            await Task.Delay(1500, token).ConfigureAwait(false);
+            State = previous;
+            log.Add(
+                "serve",
+                LogKind.Warning,
+                $"PID {string.Join("、", survivors)} 仍在執行，未能停止（可能沒有權限）；已保留監看，請手動結束"
+            );
+            return;
         }
 
         try
@@ -608,6 +598,18 @@ public sealed class ServerService : IDisposable
         ServerPid = null;
         State = ServerState.Stopped;
         log.Add("serve", LogKind.Info, "伺服器已停止");
+    }
+
+    private static async Task WaitUntilGoneAsync(List<int> pids, int attempts, CancellationToken token)
+    {
+        for (int attempt = 0; attempt < attempts; attempt++)
+        {
+            await Task.Delay(500, token).ConfigureAwait(false);
+            if (!pids.Any(IsProcessAlive))
+            {
+                return;
+            }
+        }
     }
 
     /// <summary>對設定的探測網址做一次請求，回報狀態碼與延遲。</summary>
@@ -673,41 +675,6 @@ public sealed class ServerService : IDisposable
         }
     }
 
-    /// <summary>
-    /// 取得候選行程 PID 集合，用來比對啟動前後的差異。
-    /// 有設定 processNames 就依名稱找（此時行程可能還沒載入 CLR，不能只看受控行程）；
-    /// 沒設定就掃描所有受控行程 —— 新啟動的網站載入 CLR 後就會出現在這份清單裡。
-    /// </summary>
-    private HashSet<int> SnapshotCandidatePids()
-    {
-        if (config.ProcessNames.Length == 0)
-        {
-            return ManagedProcessFinder.List(Array.Empty<string>()).Select(p => p.Pid).ToHashSet();
-        }
-
-        var pids = new HashSet<int>();
-        foreach (string name in config.ProcessNames)
-        {
-            Process[] processes = Process.GetProcessesByName(name);
-            try
-            {
-                foreach (Process process in processes)
-                {
-                    pids.Add(process.Id);
-                }
-            }
-            finally
-            {
-                foreach (Process process in processes)
-                {
-                    process.Dispose();
-                }
-            }
-        }
-
-        return pids;
-    }
-
     private static bool IsProcessAlive(int pid)
     {
         try
@@ -715,14 +682,22 @@ public sealed class ServerService : IDisposable
             using Process process = Process.GetProcessById(pid);
             return !process.HasExited;
         }
+        catch (ArgumentException)
+        {
+            // 沒有這個 PID 的行程
+            return false;
+        }
         catch
         {
-            return false;
+            // 查不到狀態（例如沒有權限）時當作還活著，寧可回報停不掉，也不要誤報已停止
+            return true;
         }
     }
 
-    private void RunTaskKill(string arguments)
+    /// <summary>以 PID 結束行程與它的子行程樹；force 為 false 時只送正常關閉訊號。回傳 taskkill 是否成功（結束碼 0）。</summary>
+    private bool TaskKill(int pid, bool force)
     {
+        string arguments = $"/PID {pid} /T{(force ? " /F" : string.Empty)}";
         try
         {
             var psi = new ProcessStartInfo("taskkill", arguments)
@@ -736,12 +711,14 @@ public sealed class ServerService : IDisposable
             };
 
             using Process? process = Process.Start(psi);
-            process?.WaitForExit(5000);
+            bool exited = process?.WaitForExit(5000) ?? false;
             log.Add("serve", LogKind.Info, $"taskkill {arguments}");
+            return exited && process!.ExitCode == 0;
         }
         catch (Exception ex)
         {
             log.Add("serve", LogKind.Error, $"taskkill 失敗: {ex.Message}");
+            return false;
         }
     }
 
