@@ -152,6 +152,27 @@ public sealed class ServeInferenceTests : IDisposable
     }
 
     [Fact]
+    public void 設定檔明確寫空的processNames時不補iisexpress()
+    {
+        string project = Write("Web/Web.csproj", OldWebProject());
+        Write("Web/clrdiag.json", "{ \"processNames\": [] }");
+
+        var config = Load(project);
+
+        Assert.Equal(FakeIis, config.ServeCommand);
+        Assert.Empty(config.ProcessNames);
+    }
+
+    [Fact]
+    public void 預設連接埠80的http網址也取得連接埠()
+    {
+        string project = Write("Web/Web.csproj", "<Project Sdk=\"Microsoft.NET.Sdk.Web\"></Project>");
+        Write("Web/Properties/launchSettings.json", "{ \"profiles\": { \"Web\": { \"applicationUrl\": \"http://localhost\" } } }");
+
+        Assert.Equal(80, Load(project).Port);
+    }
+
+    [Fact]
     public void 設定檔只寫port時推斷出啟動指令但保留設定的連接埠與行程名稱()
     {
         string project = Write("Web/Web.csproj", OldWebProject());

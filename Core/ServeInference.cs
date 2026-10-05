@@ -25,7 +25,12 @@ public static class ServeInference
     /// 設定檔明確寫的 serveArguments、port、processNames 一律保留。
     /// iisExpressLocator 回傳 iisexpress.exe 的完整路徑，找不到回傳 null（測試用於替換）。
     /// </summary>
-    public static Result Apply(DiagConfig config, bool portConfigured, Func<string?> iisExpressLocator)
+    public static Result Apply(
+        DiagConfig config,
+        bool portConfigured,
+        bool processNamesConfigured,
+        Func<string?> iisExpressLocator
+    )
     {
         string? project = config.ResolvedBuildProject;
         if (config.ServeCommand is not null || project is null)
@@ -56,7 +61,7 @@ public static class ServeInference
 
         if (HasAspNetWebAppGuid(root))
         {
-            return InferIisExpress(config, project, root, portConfigured, iisExpressLocator);
+            return InferIisExpress(config, project, root, portConfigured, processNamesConfigured, iisExpressLocator);
         }
 
         return new Result(config, $"未設定 serveCommand，{name} 不是網站專案（非 Microsoft.NET.Sdk.Web，也不是 ASP.NET Web 應用程式），只能附加到既有行程");
@@ -96,6 +101,7 @@ public static class ServeInference
         string project,
         XElement root,
         bool portConfigured,
+        bool processNamesConfigured,
         Func<string?> iisExpressLocator
     )
     {
@@ -131,7 +137,7 @@ public static class ServeInference
             ServeCommand = iisExpress,
             ServeArguments = arguments,
             Port = port,
-            ProcessNames = config.ProcessNames.Length > 0
+            ProcessNames = processNamesConfigured
                 ? config.ProcessNames
                 : new[] { IisExpressProcessName },
         };
@@ -261,7 +267,7 @@ public static class ServeInference
             if (
                 Uri.TryCreate(part.Replace("*", "localhost").Replace("+", "localhost"), UriKind.Absolute, out Uri? uri)
                 && uri.Scheme == Uri.UriSchemeHttp
-                && !uri.IsDefaultPort
+                && uri.Port > 0
             )
             {
                 return uri.Port;

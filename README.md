@@ -129,7 +129,7 @@ clrdiag 依下列順序決定要用哪個專案：
 | 舊式 ASP.NET Web 應用程式（`ProjectTypeGuids` 含 `{349c5851-65df-11da-9384-00065b846f21}`） | `iisexpress.exe /path:<專案資料夾> /port:{port}`；`processNames` 預設 `["iisexpress"]` | `<專案檔>.user` 的 `DevelopmentServerPort` → 專案檔的 `DevelopmentServerPort` → `IISUrl` 的 http 連接埠（`.user` 優先）→ 5000 |
 | 其他（主控台、類別庫、`.sln`／`.slnx`） | 不推斷，只能附加到既有行程，原因寫在 `6 記錄` | 5000 |
 
-舊式專案在 `Program Files` 與 `Program Files (x86)` 的 `IIS Express` 資料夾都找不到 `iisexpress.exe` 時不推斷，原因寫在 `6 記錄`。clrdiag 不讀 `Web.config` 與連線字串。
+舊式專案在 `Program Files` 與 `Program Files (x86)` 的 `IIS Express` 資料夾都找不到 `iisexpress.exe` 時不推斷，原因寫在 `6 記錄`。clrdiag 不讀 `Web.config` 與連線字串。推斷出的 IIS Express 指令不是 `dotnet run` wrapper，除錯啟動（netcoredbg 只支援 .NET Core）不適用舊式專案。
 
 因為推斷在載入設定時做一次，所有模式看到同一份結果：舊式 ASP.NET 專案沒有 `clrdiag.json` 時，`processNames` 變成 `iisexpress`，不加 `--pid` 的批次指令因此優先挑 `iisexpress` 行程（沒有時仍退回挑工作集最大的受控行程）。要改監看別的行程，加 `--pid`，或在 `clrdiag.json` 寫 `processNames`。
 

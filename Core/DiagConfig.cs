@@ -179,11 +179,13 @@ public sealed record DiagConfig
         string? configFile = explicitConfig ?? FindConfigFile(searchStart);
         DiagConfig config;
         bool portConfigured = false;
+        bool processNamesConfigured = false;
 
         if (configFile is not null)
         {
             string json = File.ReadAllText(configFile);
             portConfigured = HasProperty(json, nameof(Port));
+            processNamesConfigured = HasProperty(json, nameof(ProcessNames));
             config =
                 JsonSerializer.Deserialize<DiagConfig>(json, JsonOptions)
                 ?? throw new InvalidOperationException($"設定檔內容無法解析: {configFile}");
@@ -212,6 +214,7 @@ public sealed record DiagConfig
         ServeInference.Result inference = ServeInference.Apply(
             config,
             portConfigured,
+            processNamesConfigured,
             iisExpressLocator ?? ServeInference.LocateIisExpress
         );
         return inference.Config with { ServeInferenceNote = inference.Note };
