@@ -53,7 +53,9 @@ public sealed partial class DiagApp
             }
             else
             {
-                status = "伺服器啟動失敗（按 6 看記錄）";
+                status = server.LastStartError is { } reason
+                    ? $"伺服器啟動失敗：{reason}"
+                    : "伺服器啟動失敗（按 6 看記錄）";
             }
         });
     }
@@ -239,7 +241,9 @@ public sealed partial class DiagApp
             }
             else
             {
-                status = "建置成功但伺服器啟動失敗（按 6 看記錄）";
+                status = server.LastStartError is { } reason
+                    ? $"建置成功但伺服器啟動失敗：{reason}"
+                    : "建置成功但伺服器啟動失敗（按 6 看記錄）";
             }
         });
     }

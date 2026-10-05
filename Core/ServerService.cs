@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net.Security;
+using System.Text.RegularExpressions;
 
 namespace ClrDiag.Core;
 
@@ -55,6 +56,13 @@ public sealed class ServerService : IDisposable
     private int port;
     private ServerFailure lastFailure;
     private int? lastStartedPid;
+    private string? lastStartError;
+
+    // 啟動的行程輸出中第一行例外訊息（「XxxException: 訊息」）與第一行錯誤
+    // （stderr，或含 ERR／FTL／fail:／crit: 的 stdout 行）；由輸出事件執行緒寫入，
+    // 啟動失敗時附在失敗原因後面，例外訊息優先
+    private volatile string? firstAppExceptionLine;
+    private volatile string? firstAppErrorLine;
     private ServerState state = ServerState.Stopped;
     private int? serverPid;
     private DateTime? serverStart;
@@ -179,6 +187,25 @@ public sealed class ServerService : IDisposable
             lock (stateLock)
             {
                 lastFailure = value;
+            }
+        }
+    }
+
+    /// <summary>最近一次啟動失敗的原因（與 6 記錄的失敗訊息相同）；啟動成功或尚未啟動為 null。</summary>
+    public string? LastStartError
+    {
+        get
+        {
+            lock (stateLock)
+            {
+                return lastStartError;
+            }
+        }
+        private set
+        {
+            lock (stateLock)
+            {
+                lastStartError = value;
             }
         }
     }
@@ -433,6 +460,9 @@ public sealed class ServerService : IDisposable
         Process? started = null;
         bool succeeded = false;
         LastFailure = ServerFailure.None;
+        LastStartError = null;
+        firstAppExceptionLine = null;
+        firstAppErrorLine = null;
         try
         {
             if (
@@ -515,7 +545,8 @@ public sealed class ServerService : IDisposable
                 if (ServerLocator.IsFatal(last.Failure))
                 {
                     LastFailure = last.Failure;
-                    log.Add("serve", LogKind.Error, $"無法辨識伺服器行程：{last.Reason}");
+                    LastStartError = $"無法辨識伺服器行程：{last.Reason}";
+                    log.Add("serve", LogKind.Error, LastStartError);
                     return null;
                 }
 
@@ -527,10 +558,31 @@ public sealed class ServerService : IDisposable
 
             bool commandExited = process.HasExited;
             LastFailure = commandExited ? ServerFailure.StartCommandExited : ServerFailure.StartTimedOut;
-            string cause = commandExited
-                ? $"啟動指令已結束（結束碼 {process.ExitCode}），未辨識出伺服器行程"
-                : $"等待伺服器行程出現逾時（{elapsed.Elapsed.TotalSeconds:F0} 秒），未辨識出伺服器行程";
-            log.Add("serve", LogKind.Error, last.Reason is null ? cause : $"{cause}：{last.Reason}");
+            string cause;
+            if (!commandExited)
+            {
+                cause = $"等待伺服器行程出現逾時（{elapsed.Elapsed.TotalSeconds:F0} 秒），未辨識出伺服器行程";
+            }
+            else if (last.Failure == ServerFailure.NotListening)
+            {
+                // 結束碼 0 也算失敗：應用程式在監聽前就結束，常見是啟動例外被應用程式自己攔下後正常結束
+                cause = $"應用程式在監聽連接埠 {Port} 之前就結束了（結束碼 {process.ExitCode}）";
+            }
+            else
+            {
+                cause = $"啟動指令已結束（結束碼 {process.ExitCode}），未辨識出伺服器行程";
+            }
+
+            string message = last.Reason is null || last.Failure == ServerFailure.NotListening
+                ? cause
+                : $"{cause}：{last.Reason}";
+            if ((firstAppExceptionLine ?? firstAppErrorLine) is { } appError)
+            {
+                message = $"{message}；應用程式輸出的錯誤：{appError}";
+            }
+
+            LastStartError = message;
+            log.Add("serve", LogKind.Error, message);
             return null;
         }
         catch (OperationCanceledException)
@@ -812,9 +864,17 @@ public sealed class ServerService : IDisposable
     {
         var process = new Process { StartInfo = psi };
         process.OutputDataReceived += (_, e) =>
-            log.Add("serve", LogKind.Output, e.Data ?? string.Empty);
+        {
+            string line = e.Data ?? string.Empty;
+            NoteAppErrorLine(line, fromStdErr: false);
+            log.Add("serve", LogKind.Output, line);
+        };
         process.ErrorDataReceived += (_, e) =>
-            log.Add("serve", LogKind.Error, e.Data ?? string.Empty);
+        {
+            string line = e.Data ?? string.Empty;
+            NoteAppErrorLine(line, fromStdErr: true);
+            log.Add("serve", LogKind.Error, line);
+        };
 
         process.Start();
         try
@@ -830,6 +890,38 @@ public sealed class ServerService : IDisposable
         }
 
         return process;
+    }
+
+    // 例外訊息行：「Namespace.XxxException: 訊息」或「XxxException (0x80131904): 訊息」
+    private static readonly Regex ExceptionLinePattern = new(
+        @"\b[\w.]*Exception(\s*\(0x[0-9A-Fa-f]+\))?:\s*\S",
+        RegexOptions.Compiled
+    );
+
+    // Serilog 的 [.. ERR] / [.. FTL]，以及 Microsoft.Extensions.Logging 主控台格式的 fail: / crit:
+    private static readonly Regex ErrorLevelPattern = new(
+        @"\b(ERR|FTL)\]|^\s*(fail|crit):",
+        RegexOptions.Compiled
+    );
+
+    /// <summary>記下啟動行程輸出中的第一行例外訊息與第一行錯誤，啟動失敗時附在原因後面。</summary>
+    private void NoteAppErrorLine(string line, bool fromStdErr)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return;
+        }
+
+        string trimmed = line.Trim();
+        if (firstAppExceptionLine is null && ExceptionLinePattern.IsMatch(trimmed))
+        {
+            firstAppExceptionLine = trimmed;
+        }
+
+        if (firstAppErrorLine is null && (fromStdErr || ErrorLevelPattern.IsMatch(trimmed)))
+        {
+            firstAppErrorLine = trimmed;
+        }
     }
 
     /// <summary>
