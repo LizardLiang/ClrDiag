@@ -197,7 +197,7 @@ public sealed class ServerLifecycleTests
     public async Task 啟動被取消時清除啟動的行程並還原狀態()
     {
         using ServerService server = Service(Config("idle"), new LogBuffer(), FreePort());
-        // 斷言失敗時也由計時取消，不會讓啟動中的行程等滿 StartTimeout
+        // 斷言失敗時也由計時取消，不會讓尚未監聽的行程一直等下去
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
 
         Task<int?> starting = server.StartAsync(null, cts.Token);

@@ -599,15 +599,19 @@ public sealed class ServerService : IDisposable
                     break;
                 }
 
+                int seconds = (int)elapsed.Elapsed.TotalSeconds;
+                if (seconds != reportedSeconds)
+                {
+                    reportedSeconds = seconds;
+                    progress?.Invoke(
+                        last.Failure == ServerFailure.NotListening
+                            ? $"等待應用程式監聽連接埠 {Port}（已 {seconds} 秒，按 x 取消）"
+                            : $"連接埠 {Port} 已有人監聽，等待辨識伺服器行程（已 {seconds} 秒，按 x 取消）"
+                    );
+                }
+
                 if (last.Failure == ServerFailure.NotListening)
                 {
-                    int seconds = (int)elapsed.Elapsed.TotalSeconds;
-                    if (seconds != reportedSeconds)
-                    {
-                        reportedSeconds = seconds;
-                        progress?.Invoke($"等待應用程式監聽連接埠 {Port}（已 {seconds} 秒，按 x 取消）");
-                    }
-
                     if (!longWaitLogged && elapsed.Elapsed >= StartTimeout)
                     {
                         longWaitLogged = true;
