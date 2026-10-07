@@ -45,11 +45,15 @@ public sealed partial class DiagApp
         status = $"啟動開發伺服器（連接埠 {server.Port}）…";
         backgroundWork = Task.Run(async () =>
         {
-            int? pid = await server.StartAsync(null, cts.Token).ConfigureAwait(false);
+            int? pid = await server.StartAsync(null, cts.Token, text => status = text).ConfigureAwait(false);
             if (pid is not null)
             {
                 monitor.Attach(pid.Value);
                 status = $"伺服器已啟動 PID {pid} → {server.Url}";
+            }
+            else if (server.LastFailure == ServerFailure.StartCancelled)
+            {
+                status = "伺服器啟動已取消";
             }
             else
             {
@@ -129,6 +133,12 @@ public sealed partial class DiagApp
 
     private void StopServer()
     {
+        if (server.State == ServerState.Starting && server.CancelStart())
+        {
+            status = "正在取消伺服器啟動…";
+            return;
+        }
+
         if (backgroundWork is not null)
         {
             status = "已有背景工作進行中";
@@ -233,11 +243,15 @@ public sealed partial class DiagApp
             }
 
             status = "啟動伺服器…";
-            int? pid = await server.StartAsync(null, cts.Token).ConfigureAwait(false);
+            int? pid = await server.StartAsync(null, cts.Token, text => status = text).ConfigureAwait(false);
             if (pid is not null)
             {
                 monitor.Attach(pid.Value);
                 status = $"重建並重啟完成 PID {pid}（建置 {Format.Duration(result.Duration)}）";
+            }
+            else if (server.LastFailure == ServerFailure.StartCancelled)
+            {
+                status = "建置成功，伺服器啟動已取消";
             }
             else
             {

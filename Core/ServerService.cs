@@ -53,6 +53,7 @@ public sealed class ServerService : IDisposable
 
     private readonly object stateLock = new();
     private Process? serveProcess;
+    private CancellationTokenSource? startCts;
     private int port;
     private ServerFailure lastFailure;
     private int? lastStartedPid;
@@ -112,7 +113,7 @@ public sealed class ServerService : IDisposable
         }
     }
 
-    /// <summary>啟動後等待伺服器行程出現的上限；測試縮短它以免等滿 30 秒。</summary>
+    /// <summary>連接埠已有人監聽之後，等待辨識出伺服器行程的上限；測試縮短它以免等滿 30 秒。</summary>
     internal TimeSpan StartTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
     /// <summary>除錯啟動等待 wrapper 產生子行程的上限。</summary>
@@ -448,13 +449,53 @@ public sealed class ServerService : IDisposable
         }
     }
 
-    /// <summary>啟動伺服器並回傳新行程的 PID。失敗原因見 LastFailure。</summary>
-    public async Task<int?> StartAsync(int? port, CancellationToken token)
+    /// <summary>
+    /// 取消進行中的啟動（走 StartCancelled 路徑，結束啟動的行程樹）。回傳 false 表示目前沒有進行中的啟動。
+    /// </summary>
+    public bool CancelStart()
+    {
+        CancellationTokenSource? source;
+        lock (stateLock)
+        {
+            source = state == ServerState.Starting ? startCts : null;
+        }
+
+        if (source is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            source.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// 啟動伺服器並回傳新行程的 PID。失敗原因見 LastFailure。
+    /// 行程活著而連接埠還沒有人監聽時一直等（應用程式可能在遷移資料庫等），直到行程結束、
+    /// 發生無法辨識的致命失敗或被 CancelStart／token 取消；progress 每秒回報一次等待進度。
+    /// </summary>
+    public async Task<int?> StartAsync(int? port, CancellationToken token, Action<string>? progress = null)
     {
         if (!TryBeginStart(out ServerState previous, out int? existingPid))
         {
             return existingPid;
         }
+
+        using var startSource = CancellationTokenSource.CreateLinkedTokenSource(token);
+        lock (stateLock)
+        {
+            startCts = startSource;
+        }
+
+        token = startSource.Token;
 
         int previousPort = Port;
         Process? started = null;
@@ -519,6 +560,9 @@ public sealed class ServerService : IDisposable
 
             // 每輪只查連接埠擁有者與行程樹（毫秒級），不掃描全部行程的模組
             var elapsed = Stopwatch.StartNew();
+            Stopwatch? listening = null;
+            int reportedSeconds = -1;
+            bool longWaitLogged = false;
             LocateResult last;
             while (true)
             {
@@ -550,7 +594,35 @@ public sealed class ServerService : IDisposable
                     return null;
                 }
 
-                if (exited || elapsed.Elapsed >= StartTimeout)
+                if (exited)
+                {
+                    break;
+                }
+
+                if (last.Failure == ServerFailure.NotListening)
+                {
+                    int seconds = (int)elapsed.Elapsed.TotalSeconds;
+                    if (seconds != reportedSeconds)
+                    {
+                        reportedSeconds = seconds;
+                        progress?.Invoke($"等待應用程式監聽連接埠 {Port}（已 {seconds} 秒，按 x 取消）");
+                    }
+
+                    if (!longWaitLogged && elapsed.Elapsed >= StartTimeout)
+                    {
+                        longWaitLogged = true;
+                        log.Add(
+                            "serve",
+                            LogKind.Info,
+                            $"應用程式啟動超過 {StartTimeout.TotalSeconds:F0} 秒仍未監聽連接埠 {Port}，繼續等待（按 x 取消）"
+                        );
+                    }
+
+                    continue;
+                }
+
+                listening ??= Stopwatch.StartNew();
+                if (listening.Elapsed >= StartTimeout)
                 {
                     break;
                 }
@@ -561,7 +633,7 @@ public sealed class ServerService : IDisposable
             string cause;
             if (!commandExited)
             {
-                cause = $"等待伺服器行程出現逾時（{elapsed.Elapsed.TotalSeconds:F0} 秒），未辨識出伺服器行程";
+                cause = $"連接埠 {Port} 已有人監聽，但等了 {listening?.Elapsed.TotalSeconds ?? 0:F0} 秒仍未辨識出伺服器行程";
             }
             else if (last.Failure == ServerFailure.NotListening)
             {
@@ -599,6 +671,11 @@ public sealed class ServerService : IDisposable
         }
         finally
         {
+            lock (stateLock)
+            {
+                startCts = null;
+            }
+
             FinishStart(succeeded, previous, previousPort, started);
         }
     }

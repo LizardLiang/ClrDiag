@@ -172,18 +172,25 @@ public sealed class ServerLifecycleTests
     }
 
     [Fact]
-    public async Task 等不到監聽者時逾時並清除啟動的行程樹()
+    public async Task 行程活著但還沒監聽時超過StartTimeout仍繼續等待直到取消()
     {
-        using ServerService server = Service(Config("idle"), new LogBuffer(), FreePort(), timeoutSeconds: 2);
+        using ServerService server = Service(Config("idle"), new LogBuffer(), FreePort(), timeoutSeconds: 1);
+        // 斷言失敗時也由計時取消，不會讓啟動中的行程一直留著
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
 
-        int? pid = await server.StartAsync(null, CancellationToken.None);
+        Task<int?> starting = server.StartAsync(null, cts.Token);
+        await Task.Delay(TimeSpan.FromSeconds(3));
 
-        Assert.Null(pid);
-        Assert.Equal(ServerState.Stopped, server.State);
-        Assert.Equal(ServerFailure.StartTimedOut, server.LastFailure);
+        Assert.False(starting.IsCompleted);
+        Assert.Equal(ServerState.Starting, server.State);
         int started = server.LastStartedPid!.Value;
+        Assert.True(server.CancelStart());
+        Assert.Null(await starting);
+        Assert.Equal(ServerFailure.StartCancelled, server.LastFailure);
+        Assert.Equal(ServerState.Stopped, server.State);
         await WaitGoneAsync(started);
         Assert.False(Alive(started));
+        Assert.False(server.CancelStart());
     }
 
     [Fact]
