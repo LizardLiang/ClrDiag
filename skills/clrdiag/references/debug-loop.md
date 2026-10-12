@@ -52,6 +52,9 @@ command object. ClrDiag replies with one state message.
 | `stepOut` | none | Step out. |
 | `pause` | none | Pause. |
 | `status` | none | Read the current state. Changes nothing. |
+| `start` | none | Start the dev server. Same code as the `s` key. |
+| `stop` | none | Stop the dev server. Same code as the `x` key. |
+| `restart` | none | Stop, build, and start. Same code as the `r` key. |
 
 A malformed or unknown command returns the same state object plus an `error` field.
 
@@ -65,6 +68,58 @@ A malformed or unknown command returns the same state object plus an `error` fie
 Test for the presence of the `error` key. Never match the CJK text literally. Parse
 the JSON first if you need to read the message.
 
+## Server control: `start`, `stop`, `restart`
+
+These three commands call the code that the `s`, `x`, and `r` keys call. They work
+only in the interactive dashboard. A `--dap` host has no server to control and
+returns an `error` field. The command name field also accepts `type`, so
+`{"type":"restart"}` equals `{"cmd":"restart"}`.
+
+```powershell
+clrdiag --send '{"cmd":"restart"}'
+```
+
+**ClrDiag replies after the server is listening, or after the failure.** The reply to
+`restart` can take a minute because it includes the build. `--send` waits up to 10
+minutes for these three commands. Other commands still wait 10 seconds.
+
+The reply is the usual state object plus a `result` object and a `server` object.
+
+```json
+{"type":"state","sessionState":"Idle","launchMode":false,"breakpoints":[],"watches":[],"result":{"command":"restart","accepted":true,"ok":true,"message":"...","phase":"running","pid":24368,"errors":[]},"server":{"phase":"running","pid":24368,"url":"http://localhost:5000","busy":null,"last":{"command":"restart","ok":true,"phase":"running","message":"...","pid":24368,"errors":[]}}}
+```
+
+| Outcome | `result.accepted` | `result.ok` | `result.phase` | Other |
+| --- | --- | --- | --- | --- |
+| Build passed and server listens | `true` | `true` | `running` | `pid` set |
+| Build failed | `true` | `false` | `buildFailed` | `errors` holds up to 20 compiler errors. The old server is already stopped. |
+| Build passed, server did not start | `true` | `false` | `startFailed` | `message` holds the reason |
+| Another background job runs (build, start, stop, snapshot) | `false` | `false` | `null` | Nothing started. `message` names the running job. |
+| `start` while launch under the debugger is armed (`Shift+S`) and no `serveCommand` exists | `false` | `false` | `null` | No job runs. `message` holds the reason. Do not poll. |
+| Stop step failed (`stop`, or the first step of `restart`) | `true` | `false` | `running` | The server still runs. No build happened. |
+
+Every failure also sets the top-level `error` field. Test for the `error` key first.
+
+**A second `restart` while one runs is refused, not joined.** Poll `status` until
+`server.phase` leaves `building`, `starting`, and `stopping`, then send it again.
+
+**Concurrency.** A key press and a pipe command share one lock around the check and
+the assignment of the background job. At most one job runs. When both arrive
+together, one runs and the other is refused. Two builds never run at once.
+
+`status` and every reply carry the `server` object in the dashboard:
+
+| Field | Meaning |
+| --- | --- |
+| `server.phase` | `stopped`, `building`, `starting`, `running`, `stopping`, `buildFailed`, `startFailed` |
+| `server.pid` | Server PID. Set while the process is alive, including during `stopping`. |
+| `server.url` | Probe URL. Set while the process is alive, including during `stopping`. |
+| `server.busy` | Text of the running background job, or `null`. |
+| `server.last` | Result of the last start, stop, or restart. Absent before the first one. |
+
+If the user armed launch under the debugger with `Shift+S`, `start` and `restart`
+launch under the debugger, as the keys do.
+
 `status` must exist in the binary that hosts the session. That is the process
 running `--dap` or the TUI. The sending binary may be any version, because `--send`
 is only a pipe client. It serializes the JSON, writes it to the pipe, and prints
@@ -75,7 +130,7 @@ holding the escaped form of `未知指令: status`. The connection still succeed
 
 `--send` connects to the pipe, discards the greeting state, sends one command,
 prints the reply, and exits. It waits 5 seconds for the connection and 10 seconds
-for the reply. It exits with code 1 on timeout or failure. A connect timeout means
+for the reply (10 minutes for `start`, `stop`, and `restart`). It exits with code 1 on timeout or failure. A connect timeout means
 no clrdiag instance runs for this root, or `dapEnabled` is `false`.
 
 **Quoting differs by PowerShell version. Every form below is tested.**

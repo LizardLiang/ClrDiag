@@ -405,6 +405,9 @@ sign group（`ClrDiagBreakpoints`、`ClrDiagStop`），不會跟 nvim-dap 或其
 | `stepOut`          | —                     | 跳出函式                     |
 | `pause`            | —                     | 暫停                         |
 | `status`           | —                     | 只讀取目前狀態，不做任何動作 |
+| `start`            | —                     | 啟動伺服器，等同 `s` 鍵      |
+| `stop`             | —                     | 停止伺服器，等同 `x` 鍵      |
+| `restart`          | —                     | 停止、建置、啟動，等同 `r` 鍵 |
 
 `path` 在比對前只做一件正規化：`/` 一律換成 `\`（`DapSessionService.NormalizePath`），
 之後不分大小寫逐字比對。其餘一概不處理——相對路徑不會展開成絕對路徑，`..` 不會摺疊，
@@ -432,6 +435,70 @@ sign group（`ClrDiagBreakpoints`、`ClrDiagStop`），不會跟 nvim-dap 或其
   "watches": [ "counter" ]
 }
 ```
+
+#### 伺服器控制：`start`、`stop`、`restart`
+
+這三個指令呼叫互動介面 `s`、`x`、`r` 鍵執行的同一段程式，不是另一份實作。
+只有互動儀表板提供；`--dap` 模式沒有可控制的伺服器，會回 `error`。
+指令名稱的欄位也接受 `type`（`{"type":"restart"}` 與 `{"cmd":"restart"}` 相同）。
+
+```powershell
+clrdiag --send '{"cmd":"restart"}'
+```
+
+**回覆時間點：伺服器開始監聽之後。** 回覆在整段流程跑完才送出：`restart` 建置成功且伺服器開始
+監聽，或建置、啟動失敗時。建置可能要數十秒，所以 `--send` 對這三個指令最多等 10 分鐘
+（其他指令仍是 10 秒）。需要不阻塞時，改用 `status` 輪詢 `server.phase`。
+
+回覆是一般的階段狀態物件，加上 `result` 與 `server` 兩個欄位：
+
+```jsonc
+{
+  "type": "state",
+  "sessionState": "Idle",
+  /* …其餘欄位與上面相同… */
+  "result": {
+    "command": "restart",
+    "accepted": true,        // false = 已有背景工作，被拒絕，什麼都沒啟動
+    "ok": true,              // 失敗時同時出現頂層 "error"
+    "message": "重建並重啟完成 PID 24368（建置 12.3 秒）",
+    "phase": "running",
+    "pid": 24368,
+    "errors": []             // 建置失敗時放最多 20 筆編譯錯誤，例如 "Foo.cs(12,5) CS1002: ; expected"
+  },
+  "server": { "phase": "running", "pid": 24368, "url": "http://localhost:5000", "busy": null, "last": { /* 同 result */ } }
+}
+```
+
+| 情況 | `result.accepted` | `result.ok` | `result.phase` |
+| ---- | ----------------- | ----------- | -------------- |
+| 建置成功且伺服器已監聽 | `true` | `true` | `running`，`pid` 有值 |
+| 建置失敗（伺服器已先停止，未重啟） | `true` | `false` | `buildFailed`，`errors` 有編譯錯誤 |
+| 建置成功但伺服器啟動失敗 | `true` | `false` | `startFailed`，`message` 有原因 |
+| 已有背景工作（建置、啟動、停止、快照）在跑 | `false` | `false` | 無（`phase` 為 null） |
+| 已準備除錯器啟動（`Shift+S`）但沒有 `serveCommand` 時送 `start` | `false` | `false` | 無，沒有背景工作在跑，`message` 寫出原因 |
+| 停止失敗（`stop`，或 `restart` 的停止步驟） | `true` | `false` | `running`，伺服器仍在，未建置 |
+
+`start` 與 `stop` 的 `result` 形狀相同。啟動中送 `stop` 會取消那次啟動，立刻回 `accepted: true`。
+
+**已在重啟時再送 `restart`：拒絕，不併入。** 回覆 `accepted: false`，`message` 寫出正在跑的工作
+（例如 `已有背景工作進行中：重建並重啟`），`error` 也會出現。呼叫端等 `status` 顯示
+`server.phase` 不再是 `building`／`starting`／`stopping` 後再重送。
+
+**並行保護。** 按鍵與管道指令共用同一把鎖，檢查與指派「背景工作」在鎖內一起完成，
+所以同一時間最多一個背景工作。按鍵與管道同時到達時，一方執行、另一方被拒絕，不會跑出兩次建置。
+
+`status` 與每則回覆（含主動推播）在互動模式多一個 `server` 物件：
+
+| 欄位 | 說明 |
+| ---- | ---- |
+| `server.phase` | `stopped`、`building`、`starting`、`running`、`stopping`、`buildFailed`、`startFailed` |
+| `server.pid` | 伺服器行程 PID，行程還活著時有值（`stopping` 期間也有） |
+| `server.url` | 探測網址，行程還活著時有值（`stopping` 期間也有） |
+| `server.busy` | 背景工作進行中時的說明，否則 null |
+| `server.last` | 最近一次 start／stop／restart 的結果（同 `result`），尚無則省略 |
+
+`debugArmed`（`Shift+S`）是儀表板上的狀態：已準備時，`start` 與 `restart` 跟按鍵一樣走除錯器啟動。
 
 ## 找記憶體洩漏的流程
 

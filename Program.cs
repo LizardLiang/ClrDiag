@@ -1,6 +1,7 @@
 using System.IO.Pipes;
 using System.Reflection;
 using System.Text;
+using System.Text.Json.Nodes;
 using ClrDiag.Core;
 using ClrDiag.Core.Dap;
 using ClrDiag.Ui;
@@ -879,6 +880,20 @@ static int RunRootPaths(DiagConfig config, int? pid, string typeName)
     }
 }
 
+static bool IsServerControlCommand(string commandJson)
+{
+    try
+    {
+        JsonNode? node = JsonNode.Parse(commandJson);
+        string? cmd = (string?)node?["cmd"] ?? (string?)node?["type"];
+        return cmd is not null && ServerCommands.IsServerCommand(cmd);
+    }
+    catch
+    {
+        return false;
+    }
+}
+
 /// <summary>
 /// 對專案的除錯指令管道送一個指令、印出回覆後結束。這是最方便手動測試通道的入口，
 /// 也是 VS Code 在專屬擴充套件（規劃中的後續階段）完成前的過渡方案——綁一個鍵跑
@@ -908,10 +923,11 @@ static async Task<int> RunSend(DiagConfig config, string commandJson)
         await reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
 
         await writer.WriteLineAsync(commandJson).ConfigureAwait(false);
-        string? reply = await reader
-            .ReadLineAsync()
-            .WaitAsync(TimeSpan.FromSeconds(10))
-            .ConfigureAwait(false);
+        // start／stop／restart 要等建置與啟動跑完才回覆，等待上限比一般指令長
+        TimeSpan replyTimeout = IsServerControlCommand(commandJson)
+            ? TimeSpan.FromMinutes(10)
+            : TimeSpan.FromSeconds(10);
+        string? reply = await reader.ReadLineAsync().WaitAsync(replyTimeout).ConfigureAwait(false);
 
         if (reply is null)
         {

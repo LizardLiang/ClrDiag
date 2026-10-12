@@ -211,11 +211,21 @@ Placeholders `{project}`, `{config}`, `{root}`, and `{port}` expand inside
 
 ### Starting and stopping the server
 
-**There is no `--serve` flag and no `--start` flag.** Server control is
-interactive only. A human presses `s` to start, `x` to stop, and `r` to rebuild
-and restart. An agent cannot press those keys.
+**There is no `--serve` flag and no `--start` flag.** An agent controls the server
+through the pipe, while the interactive dashboard runs. The pipe commands call the
+code that the keys call: `start` equals `s`, `stop` equals `x`, and `restart`
+equals `r` (stop, build, start).
 
-To start a server from an agent, run the project command directly.
+```powershell
+clrdiag --send '{"cmd":"restart"}'
+```
+
+The reply arrives after the server listens, or after the build or start fails.
+Read `result.ok`, `result.phase`, and `result.errors`. See "Server control" in
+`references/debug-loop.md` for the reply shapes and the `server` fields of `status`.
+These commands need the dashboard to run for this project and ClrDiag 0.5.0 or newer.
+
+When no dashboard runs, start a server from the project command directly.
 
 ```powershell
 dotnet run --project .\src\MyApp\MyApp.csproj --urls http://localhost:5000
