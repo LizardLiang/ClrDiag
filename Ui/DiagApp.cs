@@ -28,7 +28,7 @@ public enum HeapSort
 /// 最下面是單列的按鍵與狀態列。
 /// 所有耗時工作（建置、快照、根參考搜尋）都在背景執行，UI 迴圈只負責繪製與收鍵。
 /// </summary>
-public sealed partial class DiagApp : IDisposable
+public sealed partial class DiagApp : IDisposable, IServerControl
 {
     private readonly DiagConfig config;
     private readonly LogBuffer log = new();
@@ -81,6 +81,12 @@ public sealed partial class DiagApp : IDisposable
     private List<RootPath>? rootPaths;
     private string? rootPathsType;
     private Task? backgroundWork;
+
+    // 互動介面的按鍵與管道執行緒都會要求背景工作；檢查 backgroundWork 與指派它必須在同一把鎖內，
+    // 否則兩邊可能同時看到 null 而各自啟動一次建置。
+    private readonly object workGate = new();
+    private volatile string? serverPhase;
+    private volatile ServerCommandOutcome? lastServerOutcome;
     private DateTime lastProbe = DateTime.MinValue;
 
     /// <summary>startupStatus 是啟動時狀態列顯示的訊息，例如選定的專案；null 時顯示「就緒」。</summary>
@@ -143,7 +149,12 @@ public sealed partial class DiagApp : IDisposable
             return;
         }
 
-        dapPipe = new DebugCommandServer(dap, log, DebugCommandServer.PipeNameFor(config.Root));
+        dapPipe = new DebugCommandServer(
+            dap,
+            log,
+            DebugCommandServer.PipeNameFor(config.Root),
+            serverControl: this
+        );
         dapPipe.Start();
     }
 
@@ -288,10 +299,13 @@ public sealed partial class DiagApp : IDisposable
             StartSnapshot(includeTypes: true, reason: "自動");
         }
 
-        if (backgroundWork is { IsCompleted: true })
+        lock (workGate)
         {
-            backgroundWork = null;
-            busy = null;
+            if (backgroundWork is { IsCompleted: true })
+            {
+                backgroundWork = null;
+                busy = null;
+            }
         }
     }
 
@@ -469,19 +483,19 @@ public sealed partial class DiagApp : IDisposable
                 }
                 else
                 {
-                    StartServer();
+                    ShowRefusal(StartServer());
                 }
 
                 break;
             case 'x':
-                StopServer();
+                ShowRefusal(StopServer());
                 break;
             case 'w':
                 watchInputMode = true;
                 status = "輸入監看運算式，Enter 新增（已存在則移除）· Esc 取消";
                 break;
             case 'r':
-                RestartWithBuild();
+                ShowRefusal(RestartWithBuild());
                 break;
             case 'n':
                 StartSnapshot(includeTypes: true, reason: "手動");

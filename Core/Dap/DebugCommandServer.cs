@@ -39,13 +39,24 @@ public sealed class DebugCommandServer : IDisposable
     private readonly object clientsGate = new();
     private readonly List<ClientConnection> clients = new();
     private readonly Action<int> onProcessStarted;
+    private readonly IServerControl? serverControl;
 
     private Task? acceptLoop;
 
-    public DebugCommandServer(DapSessionService session, LogBuffer log, string pipeName)
+    /// <summary>
+    /// serverControl 是 start／stop／restart 指令的執行端；只有互動介面提供，--dap 這類沒有
+    /// 伺服器可控的模式傳 null，這三個指令會回覆錯誤。
+    /// </summary>
+    public DebugCommandServer(
+        DapSessionService session,
+        LogBuffer log,
+        string pipeName,
+        IServerControl? serverControl = null
+    )
     {
         this.session = session;
         this.log = log;
+        this.serverControl = serverControl;
         PipeName = pipeName;
         onProcessStarted = _ => Broadcast();
     }
@@ -250,10 +261,15 @@ public sealed class DebugCommandServer : IDisposable
             return ErrorState($"無法解析指令: {ex.Message}");
         }
 
-        string? cmd = (string?)node?["cmd"];
+        string? cmd = (string?)node?["cmd"] ?? (string?)node?["type"];
         if (string.IsNullOrEmpty(cmd))
         {
             return ErrorState("指令缺少 cmd 欄位");
+        }
+
+        if (ServerCommands.IsServerCommand(cmd))
+        {
+            return await HandleServerCommandAsync(cmd, token).ConfigureAwait(false);
         }
 
         try
@@ -316,6 +332,110 @@ public sealed class DebugCommandServer : IDisposable
         }
 
         return BuildStateMessage();
+    }
+
+    /// <summary>
+    /// start／stop／restart 呼叫互動介面 s／x／r 鍵走的同一組方法，並等到流程跑完才回覆：
+    /// restart 的回覆時間點是伺服器開始監聽之後（或建置／啟動失敗）。已有背景工作時直接拒絕，
+    /// 不排隊也不併入進行中的那一次。
+    /// </summary>
+    private async Task<JsonObject> HandleServerCommandAsync(string cmd, CancellationToken token)
+    {
+        if (serverControl is null)
+        {
+            return ErrorState($"此模式沒有可控制的伺服器，無法執行 {cmd}");
+        }
+
+        try
+        {
+            ServerCommandTicket ticket = cmd switch
+            {
+                ServerCommands.Start => serverControl.Start(),
+                ServerCommands.Stop => serverControl.Stop(),
+                _ => serverControl.Restart(),
+            };
+
+            if (!ticket.Accepted)
+            {
+                return ServerResultState(cmd, accepted: false, ok: false, ticket.Message, null);
+            }
+
+            if (ticket.Completion is null)
+            {
+                return ServerResultState(cmd, accepted: true, ok: true, ticket.Message, null);
+            }
+
+            ServerCommandOutcome outcome = await ticket.Completion.WaitAsync(token).ConfigureAwait(false);
+            return ServerResultState(cmd, accepted: true, outcome.Ok, outcome.Message, outcome);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return ErrorState($"指令 {cmd} 執行失敗: {ex.Message}");
+        }
+    }
+
+    private JsonObject ServerResultState(
+        string cmd,
+        bool accepted,
+        bool ok,
+        string message,
+        ServerCommandOutcome? outcome
+    )
+    {
+        JsonObject state = BuildStateMessage();
+        state["result"] = new JsonObject
+        {
+            ["command"] = cmd,
+            ["accepted"] = accepted,
+            ["ok"] = ok,
+            ["message"] = message,
+            ["phase"] = outcome?.Phase,
+            ["pid"] = outcome?.Pid,
+            ["errors"] = new JsonArray(
+                (outcome?.Errors ?? Array.Empty<string>())
+                    .Select(e => (JsonNode)JsonValue.Create(e)!)
+                    .ToArray()
+            ),
+        };
+
+        if (!ok)
+        {
+            state["error"] = message;
+        }
+
+        return state;
+    }
+
+    private static JsonObject ServerNode(ServerControlSnapshot snapshot)
+    {
+        var node = new JsonObject
+        {
+            ["phase"] = snapshot.Phase,
+            ["pid"] = snapshot.Pid,
+            ["url"] = snapshot.Url,
+            ["busy"] = snapshot.Busy,
+        };
+
+        if (snapshot.Last is { } last)
+        {
+            node["last"] = new JsonObject
+            {
+                ["command"] = last.Command,
+                ["ok"] = last.Ok,
+                ["phase"] = last.Phase,
+                ["message"] = last.Message,
+                ["pid"] = last.Pid,
+                ["errors"] = new JsonArray(
+                    last.Errors.Select(e => (JsonNode)JsonValue.Create(e)!).ToArray()
+                ),
+            };
+        }
+
+        return node;
     }
 
     private static string RequireString(JsonNode node, string field) =>
@@ -389,6 +509,11 @@ public sealed class DebugCommandServer : IDisposable
         msg["watches"] = new JsonArray(
             session.Watches.Select(w => (JsonNode)JsonValue.Create(w.Expression)).ToArray()
         );
+
+        if (serverControl is not null)
+        {
+            msg["server"] = ServerNode(serverControl.Snapshot());
+        }
 
         return msg;
     }
